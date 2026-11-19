@@ -1,0 +1,518 @@
+"use client";
+
+/**
+ * THE INSTANT QUOTATION CALCULATOR
+ *
+ * Step 1  Choose rooms/services (add as many as you like)
+ * Step 2  Enter measurements (metres or centimetres)
+ * Step 3  Room condition + number of coats
+ * Step 4  Upload up to six photos
+ * Step 5  See the estimate with a full breakdown
+ * Step 6  Send your details → saved as an enquiry with a reference number
+ *
+ * The price shown here uses the same pricing engine as the server. The server
+ * recalculates it when the enquiry is saved, so the saved price can't be tampered with.
+ */
+import { useMemo, useRef, useState, type FormEvent } from "react";
+import { useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { ArrowLeft, ArrowRight, BedDouble, CheckCircle2, Layers, Loader2, Pencil, PaintRoller, Sofa, Trash2, Square } from "lucide-react";
+import { calculateQuote, formatPence } from "@/lib/pricing/engine";
+import type { PricingSettings } from "@/lib/pricing/types";
+import { customerDetailsSchema, type CustomerDetails } from "@/lib/enquiry";
+import { LIMITS } from "@/lib/pricing/schema";
+import { Button, buttonClasses } from "@/components/ui/Button";
+import { Alert, Field, Input, Select, Textarea } from "@/components/ui/Form";
+import { PRICING_RULES } from "@/components/home/PricingPromise";
+import { createItem, validItems, validateDraft, type ItemDraft, type ItemKind, type Unit } from "./draft";
+import { ItemMeasurements } from "./ItemMeasurements";
+import { ItemCondition } from "./ItemCondition";
+import { PhotoUploader, type UploadedPhoto } from "./PhotoUploader";
+import { QuoteBreakdown, ESTIMATE_STATEMENT } from "./QuoteBreakdown";
+import { RoomDiagram, SkirtingDiagram } from "./MeasureDiagram";
+
+const STEPS = ["Services", "Measurements", "Condition", "Photos", "Estimate", "Your details"] as const;
+
+const ADD_OPTIONS: { kind: ItemKind; label: string; note: string; icon: typeof BedDouble }[] = [
+  { kind: "bedroom", label: "Bedroom", note: "Walls, priced per m²", icon: BedDouble },
+  { kind: "living_room", label: "Living room", note: "Walls, priced per m²", icon: Sofa },
+  { kind: "skirting", label: "Skirting boards", note: "Priced per metre", icon: Layers },
+  { kind: "ceiling", label: "Ceiling only", note: "Optional extra – or add it to a room", icon: Square },
+];
+
+type CustomerDraft = {
+  fullName: string;
+  email: string;
+  phone: string;
+  postcode: string;
+  preferredContact: "phone" | "email" | "either";
+  preferredStartDate: string;
+  comments: string;
+  website: string;
+};
+
+const EMPTY_CUSTOMER: CustomerDraft = { fullName: "", email: "", phone: "", postcode: "", preferredContact: "phone", preferredStartDate: "", comments: "", website: "" };
+
+const VALID_KINDS: ItemKind[] = ["bedroom", "living_room", "skirting", "ceiling"];
+
+export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingSettings; uploadsEnabled: boolean }) {
+  const searchParams = useSearchParams();
+  const [items, setItems] = useState<ItemDraft[]>(() => {
+    const add = searchParams.get("add") as ItemKind | null;
+    return add && VALID_KINDS.includes(add) ? [createItem(add, [], pricing.standardCoats, `initial-${add}`)] : [];
+  });
+  const [step, setStep] = useState(0);
+  const [unit, setUnit] = useState<Unit>("m");
+  const [showErrors, setShowErrors] = useState(false);
+  const [photos, setPhotos] = useState<UploadedPhoto[]>([]);
+  const [customer, setCustomer] = useState<CustomerDraft>(EMPTY_CUSTOMER);
+  const [customerErrors, setCustomerErrors] = useState<Partial<Record<keyof CustomerDetails, string>>>({});
+  const [stepError, setStepError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [reference, setReference] = useState<string | null>(null);
+  const topRef = useRef<HTMLDivElement>(null);
+  const draftIdRef = useRef<string | null>(null);
+  const getDraftId = () => (draftIdRef.current ??= crypto.randomUUID());
+
+  const quote = useMemo(() => calculateQuote(validItems(items), pricing), [items, pricing]);
+  const validations = useMemo(() => Object.fromEntries(items.map((i) => [i.id, validateDraft(i)])), [items]);
+  const allValid = items.length > 0 && items.every((i) => validations[i.id].item !== null);
+
+  const update = (id: string, patch: Partial<ItemDraft>) => setItems((prev) => prev.map((i) => (i.id === id ? ({ ...i, ...patch } as ItemDraft) : i)));
+  const addItem = (kind: ItemKind) => setItems((prev) => [...prev, createItem(kind, prev, pricing.standardCoats)]);
+  const removeItem = (id: string) => setItems((prev) => prev.filter((i) => i.id !== id));
+
+  function goTo(next: number) {
+    setStepError(null);
+    setStep(next);
+    requestAnimationFrame(() => topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  function next() {
+    if (step === 0 && items.length === 0) return setStepError("Add at least one room or service to continue.");
+    if (step === 1 && !allValid) {
+      setShowErrors(true);
+      return setStepError("Please check the highlighted measurements.");
+    }
+    if (step === 3 && photos.some((p) => p.status === "uploading")) return setStepError("Please wait for your photos to finish uploading.");
+    goTo(step + 1);
+  }
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setSubmitError(null);
+    const parsed = customerDetailsSchema.safeParse({
+      ...customer,
+      preferredStartDate: customer.preferredStartDate || undefined,
+      comments: customer.comments || undefined,
+    });
+    if (!parsed.success) {
+      const errs: Partial<Record<keyof CustomerDetails, string>> = {};
+      for (const issue of parsed.error.issues) {
+        const key = issue.path[0] as keyof CustomerDetails;
+        if (!errs[key]) errs[key] = issue.message;
+      }
+      setCustomerErrors(errs);
+      return;
+    }
+    setCustomerErrors({});
+    const finalItems = validItems(items);
+    if (finalItems.length !== items.length) return setSubmitError("Some measurements are missing. Please go back and check them.");
+
+    setSubmitting(true);
+    try {
+      const res = await fetch("/api/enquiries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          draftId: getDraftId(),
+          items: finalItems,
+          customer: parsed.data,
+          photos: photos.filter((p) => p.status === "done" && p.path).map((p) => ({ path: p.path, fileName: p.fileName, contentType: p.contentType, size: p.size })),
+          website: customer.website,
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || "Something went wrong. Please try again.");
+      setReference(json.reference);
+      requestAnimationFrame(() => topRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const hasRooms = items.some((i) => i.type === "bedroom" || i.type === "living_room" || i.type === "ceiling");
+  const hasSkirting = items.some((i) => i.type === "skirting");
+
+  // ---------- Confirmation ----------
+  if (reference) {
+    return (
+      <div ref={topRef} className="mx-auto max-w-2xl scroll-mt-24 rounded-xl bg-white p-8 text-center shadow-sm ring-1 ring-navy-900/10 sm:p-12">
+        <CheckCircle2 className="mx-auto size-14 text-emerald-600" aria-hidden />
+        <h2 className="mt-5 text-3xl">Thank you – your enquiry has been sent</h2>
+        <p className="mt-4 text-lg text-navy-700">Your enquiry reference is</p>
+        <p className="mt-2 inline-block rounded-lg bg-sand-50 px-5 py-3 font-mono text-2xl font-semibold tracking-wider text-navy-950 ring-1 ring-sand-200">{reference}</p>
+        <div className="mt-8 space-y-3 text-left text-[15px] leading-relaxed text-navy-800">
+          <p>
+            <strong>What happens next:</strong> we&rsquo;ll review your measurements and photographs, then contact you by your preferred method to confirm your fixed quotation.
+          </p>
+          <p>
+            <strong>This is not a booking yet.</strong> Nothing is arranged and you are not committed to anything until you&rsquo;ve seen and approved your fixed quotation.
+          </p>
+          <p>Please keep your reference handy in case you need to get in touch.</p>
+        </div>
+        <Link href="/" className={buttonClasses("outline", "md", "mt-8")}>
+          Back to the homepage
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <div ref={topRef} className="scroll-mt-24">
+      {/* Progress */}
+      <nav aria-label="Quotation steps" className="mb-8">
+        <ol className="flex gap-1.5">
+          {STEPS.map((name, i) => (
+            <li key={name} className="flex-1">
+              <div className={`h-1.5 rounded-full ${i <= step ? "bg-gold-500" : "bg-navy-900/10"}`} />
+              <span className={`mt-2 hidden text-xs font-medium sm:block ${i === step ? "text-navy-950" : "text-navy-600"}`} aria-current={i === step ? "step" : undefined}>
+                {i + 1}. {name}
+              </span>
+            </li>
+          ))}
+        </ol>
+        <p className="mt-3 text-sm font-medium text-navy-700 sm:hidden">
+          Step {step + 1} of {STEPS.length}: {STEPS[step]}
+        </p>
+      </nav>
+
+      <div className={`grid gap-8 ${step >= 1 && step <= 3 ? "lg:grid-cols-[1fr_320px]" : ""}`}>
+        <div className="min-w-0">
+          {/* STEP 1: SERVICES */}
+          {step === 0 && (
+            <section aria-labelledby="step-services">
+              <h2 id="step-services" className="text-2xl sm:text-3xl">
+                What would you like painted?
+              </h2>
+              <p className="mt-2 text-navy-700">Add each room separately – for example Bedroom 1, Bedroom 2 and the living room. You can add a ceiling to any room on the next step.</p>
+              <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                {ADD_OPTIONS.map(({ kind, label, note, icon: Icon }) => (
+                  <button
+                    key={kind}
+                    type="button"
+                    onClick={() => addItem(kind)}
+                    disabled={items.length >= LIMITS.maxItems}
+                    className="flex items-center gap-4 rounded-xl bg-white p-4 text-left ring-1 ring-navy-900/12 transition hover:bg-sand-50 hover:ring-gold-500 disabled:opacity-50"
+                  >
+                    <span className="grid size-11 shrink-0 place-items-center rounded-lg bg-sand-100 text-gold-700">
+                      <Icon className="size-5" aria-hidden />
+                    </span>
+                    <span className="flex-1">
+                      <span className="block font-medium text-navy-950">+ Add {label.toLowerCase()}</span>
+                      <span className="block text-sm text-navy-600">{note}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              <h3 className="mt-10 font-sans text-lg font-semibold">Your quotation ({items.length})</h3>
+              {items.length === 0 ? (
+                <p className="mt-3 rounded-lg bg-sand-50 p-5 text-navy-700">Nothing added yet. Choose from the options above.</p>
+              ) : (
+                <ul className="mt-3 divide-y divide-navy-900/8 rounded-xl bg-white ring-1 ring-navy-900/10">
+                  {items.map((item) => (
+                    <li key={item.id} className="flex items-center gap-3 px-4 py-3">
+                      <PaintRoller className="size-5 shrink-0 text-gold-600" aria-hidden />
+                      <label className="sr-only" htmlFor={`label-${item.id}`}>
+                        Name for this item
+                      </label>
+                      <div className="relative flex-1">
+                        <input
+                          id={`label-${item.id}`}
+                          value={item.label}
+                          maxLength={60}
+                          onChange={(e) => update(item.id, { label: e.target.value })}
+                          onBlur={(e) => !e.target.value.trim() && update(item.id, { label: "Room" })}
+                          className="w-full rounded-md border border-transparent px-2 py-1.5 text-[15px] font-medium text-navy-950 hover:border-navy-900/15 focus:border-gold-500 focus:outline-none"
+                        />
+                        <Pencil className="pointer-events-none absolute right-2 top-1/2 size-3.5 -translate-y-1/2 text-navy-600/50" aria-hidden />
+                      </div>
+                      <button type="button" onClick={() => removeItem(item.id)} className="grid size-10 place-items-center rounded-md text-navy-600 hover:bg-red-50 hover:text-red-700">
+                        <Trash2 className="size-4" aria-hidden />
+                        <span className="sr-only">Remove {item.label}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+
+          {/* STEP 2: MEASUREMENTS */}
+          {step === 1 && (
+            <section aria-labelledby="step-measure">
+              <div className="flex flex-wrap items-end justify-between gap-4">
+                <div>
+                  <h2 id="step-measure" className="text-2xl sm:text-3xl">
+                    Your measurements
+                  </h2>
+                  <p className="mt-2 text-navy-700">A tape measure is all you need. Round to the nearest 5 cm – it doesn&rsquo;t need to be exact.</p>
+                </div>
+                <fieldset className="flex rounded-lg bg-white p-1 ring-1 ring-navy-900/12">
+                  <legend className="sr-only">Measurement units</legend>
+                  {(["m", "cm"] as const).map((u) => (
+                    <label key={u} className={`cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium ${unit === u ? "bg-navy-900 text-white" : "text-navy-800 hover:bg-sand-50"}`}>
+                      <input type="radio" name="unit" value={u} checked={unit === u} onChange={() => setUnit(u)} className="sr-only" />
+                      {u === "m" ? "Metres" : "Centimetres"}
+                    </label>
+                  ))}
+                </fieldset>
+              </div>
+
+              <details className="mt-6 rounded-xl bg-sand-50 ring-1 ring-sand-200" open>
+                <summary className="cursor-pointer px-5 py-4 font-medium text-navy-950">Where do I measure?</summary>
+                <div className="grid gap-6 px-5 pb-5 md:grid-cols-2">
+                  {hasRooms && (
+                    <div>
+                      <RoomDiagram />
+                      <ul className="mt-3 space-y-1.5 text-sm text-navy-800">
+                        <li>
+                          <strong>Length and width:</strong> measure along the floor from one wall to the opposite wall.
+                        </li>
+                        <li>
+                          <strong>Wall height:</strong> from the top of the floor to the ceiling.
+                        </li>
+                        <li>
+                          <strong>Doors and windows:</strong> don&rsquo;t subtract them – measure the full wall. That covers the careful cutting-in around them.
+                        </li>
+                      </ul>
+                    </div>
+                  )}
+                  {hasSkirting && (
+                    <div>
+                      <SkirtingDiagram />
+                      <p className="mt-3 text-sm text-navy-800">
+                        <strong>Skirting boards:</strong> measure the skirting along each wall and add the lengths together. Don&rsquo;t include doorways.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </details>
+
+              <div className="mt-6 space-y-6">
+                {items.map((item) => (
+                  <fieldset key={item.id} className="rounded-xl bg-white p-5 ring-1 ring-navy-900/10 sm:p-6">
+                    <legend className="sr-only">{item.label}</legend>
+                    <h3 aria-hidden className="mb-5 font-serif text-xl">
+                      {item.label}
+                    </h3>
+                    <ItemMeasurements item={item} unit={unit} errors={showErrors ? validations[item.id].errors : {}} update={(p) => update(item.id, p)} />
+                  </fieldset>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* STEP 3: CONDITION */}
+          {step === 2 && (
+            <section aria-labelledby="step-condition">
+              <h2 id="step-condition" className="text-2xl sm:text-3xl">
+                Room condition
+              </h2>
+              <p className="mt-2 text-navy-700">
+                Filling small nail holes and minor cracks is included. Bigger repairs, wallpaper removal or damp need to be seen first, so those items get a manual quotation instead of a guess.
+              </p>
+              <div className="mt-6 space-y-6">
+                {items.map((item) => (
+                  <div key={item.id} className="rounded-xl bg-white p-5 ring-1 ring-navy-900/10 sm:p-6">
+                    <h3 className="mb-5 font-serif text-xl">{item.label}</h3>
+                    <ItemCondition item={item} update={(p) => update(item.id, p)} standardCoats={pricing.standardCoats} />
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* STEP 4: PHOTOS */}
+          {step === 3 && (
+            <section aria-labelledby="step-photos">
+              <h2 id="step-photos" className="text-2xl sm:text-3xl">
+                Add photographs <span className="text-lg font-normal text-navy-600">(optional, up to {LIMITS.maxPhotos})</span>
+              </h2>
+              <p className="mt-2 mb-6 text-navy-700">Photos let us check the condition of your walls so we can confirm your fixed price without a wasted visit.</p>
+              <div className="rounded-xl bg-white p-5 ring-1 ring-navy-900/10 sm:p-6">
+                <PhotoUploader getDraftId={getDraftId} photos={photos} setPhotos={setPhotos} enabled={uploadsEnabled} />
+              </div>
+            </section>
+          )}
+
+          {/* STEP 5: ESTIMATE */}
+          {step === 4 && (
+            <section aria-labelledby="step-estimate">
+              <h2 id="step-estimate" className="text-2xl sm:text-3xl">
+                Your estimate
+              </h2>
+              <div className="mt-6 grid gap-8 lg:grid-cols-[1.15fr_0.85fr]">
+                <div>
+                  <QuoteBreakdown quote={quote} />
+                  <p className="mt-4 rounded-lg bg-navy-50 p-4 text-[15px] leading-relaxed text-navy-900 ring-1 ring-navy-100">{ESTIMATE_STATEMENT}</p>
+                </div>
+                <div>
+                  <h3 className="font-sans text-lg font-semibold">What this price means</h3>
+                  <ul className="mt-4 space-y-4">
+                    {PRICING_RULES.map(({ icon: Icon, title, text }) => (
+                      <li key={title} className="flex gap-3">
+                        <Icon className="mt-0.5 size-5 shrink-0 text-gold-600" aria-hidden />
+                        <span className="text-[15px]">
+                          <strong className="text-navy-950">{title}.</strong> <span className="text-navy-700">{text}</span>
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-5 text-sm leading-relaxed text-navy-600">
+                    If we find the job is different from the details given (for example, more repairs are needed), we&rsquo;ll explain why, send a revised quotation, and only go ahead with your approval.
+                  </p>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* STEP 6: DETAILS */}
+          {step === 5 && (
+            <section aria-labelledby="step-details">
+              <h2 id="step-details" className="text-2xl sm:text-3xl">
+                Request your fixed quotation
+              </h2>
+              <p className="mt-2 text-navy-700">Check your quotation below, then tell us how to reach you. Sending this doesn&rsquo;t book anything or commit you to anything.</p>
+              <div className="mt-6 grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
+                <form onSubmit={submit} noValidate className="space-y-5 rounded-xl bg-white p-5 ring-1 ring-navy-900/10 sm:p-6">
+                  <Field label="Full name" htmlFor="q-name" required error={customerErrors.fullName}>
+                    <Input id="q-name" autoComplete="name" value={customer.fullName} invalid={!!customerErrors.fullName} onChange={(e) => setCustomer({ ...customer, fullName: e.target.value })} />
+                  </Field>
+                  <div className="grid gap-5 sm:grid-cols-2">
+                    <Field label="Email address" htmlFor="q-email" required error={customerErrors.email}>
+                      <Input id="q-email" type="email" autoComplete="email" value={customer.email} invalid={!!customerErrors.email} onChange={(e) => setCustomer({ ...customer, email: e.target.value })} />
+                    </Field>
+                    <Field label="Telephone number" htmlFor="q-phone" required error={customerErrors.phone}>
+                      <Input id="q-phone" type="tel" autoComplete="tel" value={customer.phone} invalid={!!customerErrors.phone} onChange={(e) => setCustomer({ ...customer, phone: e.target.value })} />
+                    </Field>
+                  </div>
+                  <div className="grid gap-5 sm:grid-cols-2">
+                    <Field label="Property postcode" htmlFor="q-postcode" required error={customerErrors.postcode}>
+                      <Input id="q-postcode" autoComplete="postal-code" value={customer.postcode} invalid={!!customerErrors.postcode} onChange={(e) => setCustomer({ ...customer, postcode: e.target.value.toUpperCase() })} />
+                    </Field>
+                    <Field label="Preferred contact method" htmlFor="q-contact" required>
+                      <Select id="q-contact" value={customer.preferredContact} onChange={(e) => setCustomer({ ...customer, preferredContact: e.target.value as CustomerDraft["preferredContact"] })}>
+                        <option value="phone">Telephone</option>
+                        <option value="email">Email</option>
+                        <option value="either">Either</option>
+                      </Select>
+                    </Field>
+                  </div>
+                  <Field label="Preferred start date (optional)" htmlFor="q-date" error={customerErrors.preferredStartDate} hint="We'll confirm availability with you.">
+                    <Input id="q-date" type="date" value={customer.preferredStartDate} onChange={(e) => setCustomer({ ...customer, preferredStartDate: e.target.value })} />
+                  </Field>
+                  <Field label="Anything else we should know? (optional)" htmlFor="q-comments" error={customerErrors.comments}>
+                    <Textarea id="q-comments" rows={4} value={customer.comments} onChange={(e) => setCustomer({ ...customer, comments: e.target.value })} />
+                  </Field>
+                  <div className="hidden" aria-hidden>
+                    <label htmlFor="q-website">Website</label>
+                    <input id="q-website" tabIndex={-1} autoComplete="off" value={customer.website} onChange={(e) => setCustomer({ ...customer, website: e.target.value })} />
+                  </div>
+                  <p className="text-sm text-navy-600">
+                    We&rsquo;ll only use your details to deal with this enquiry. See our{" "}
+                    <Link href="/privacy" className="underline underline-offset-2">
+                      privacy notice
+                    </Link>
+                    .
+                  </p>
+                  {submitError && <Alert tone="error">{submitError}</Alert>}
+                  <Button type="submit" size="lg" disabled={submitting} className="w-full">
+                    {submitting ? <Loader2 className="size-5 animate-spin" aria-hidden /> : null}
+                    {submitting ? "Sending your enquiry…" : "Send my enquiry"}
+                  </Button>
+                </form>
+                <div className="space-y-4">
+                  <QuoteBreakdown quote={quote} showWorking={false} title="Your quotation" />
+                  <p className="text-sm text-navy-700">
+                    Photos attached: <strong>{photos.filter((p) => p.status === "done").length}</strong>
+                  </p>
+                  <p className="rounded-lg bg-navy-50 p-4 text-sm leading-relaxed text-navy-900 ring-1 ring-navy-100">{ESTIMATE_STATEMENT}</p>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {stepError && (
+            <div className="mt-6">
+              <Alert tone="error">{stepError}</Alert>
+            </div>
+          )}
+
+          {/* Navigation */}
+          <div className="mt-8 flex flex-col-reverse gap-3 border-t border-navy-900/8 pt-6 sm:flex-row sm:justify-between">
+            {step > 0 ? (
+              <Button type="button" variant="outline" onClick={() => goTo(step - 1)}>
+                <ArrowLeft className="size-4" aria-hidden /> Back
+              </Button>
+            ) : (
+              <span />
+            )}
+            {step < 5 && (
+              <Button type="button" size="lg" onClick={next}>
+                {step === 3 ? "See my estimate" : step === 4 ? "Request my fixed quotation" : "Continue"} <ArrowRight className="size-4" aria-hidden />
+              </Button>
+            )}
+          </div>
+        </div>
+
+        {/* Live running total (steps 2–4) */}
+        {step >= 1 && step <= 3 && (
+          <aside aria-label="Running estimate" className="hidden lg:sticky lg:top-24 lg:block lg:self-start">
+            <div className="rounded-xl bg-navy-950 p-6 text-white">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gold-300">Running estimate</p>
+              <p className="mt-2 font-serif text-4xl" aria-live="polite">
+                {quote.hasPricedItems ? formatPence(quote.totalPence) : "—"}
+              </p>
+              <p className="mt-1 text-sm text-navy-100/70">Labour only · paint not included</p>
+              <ul className="mt-5 space-y-2 border-t border-white/10 pt-4 text-sm">
+                {items.map((item) => {
+                  const lines = quote.lines.filter((l) => l.itemId === item.id);
+                  const total = lines.reduce((s, l) => s + (l.amountPence ?? 0), 0);
+                  const manual = lines.some((l) => l.status === "manual");
+                  return (
+                    <li key={item.id} className="flex justify-between gap-3">
+                      <span className="truncate text-navy-100/85">{item.label}</span>
+                      <span className="shrink-0 font-medium">{lines.length === 0 ? "…" : manual ? "Manual quote" : formatPence(total)}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+              {quote.needsReview && <p className="mt-4 text-xs text-gold-300">Some items are flagged for review – see the estimate step.</p>}
+            </div>
+          </aside>
+        )}
+      </div>
+
+      {/* Mobile: slim running total pinned to the bottom of the screen */}
+      {step >= 1 && step <= 3 && (
+        <>
+          <div className="h-20 lg:hidden" aria-hidden />
+          <div className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-navy-950 px-5 py-3 text-white lg:hidden" aria-live="polite">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-gold-300">Running estimate</p>
+                <p className="text-xs text-navy-100/70">Labour only · paint not included</p>
+              </div>
+              <p className="font-serif text-2xl">{quote.hasPricedItems ? formatPence(quote.totalPence) : "—"}</p>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
