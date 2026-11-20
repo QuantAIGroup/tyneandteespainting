@@ -25,8 +25,8 @@ export interface BusinessSettings {
 }
 
 export const DEFAULT_BUSINESS: BusinessSettings = {
-  name: "[Your Business Name]",
-  phone: "[Your Phone Number]",
+  name: "Tyne & Tees Painting",
+  phone: "07444 359371",
   email: "[your@email.co.uk]",
   address: "",
   openingHours: "",
@@ -41,20 +41,33 @@ export function isPlaceholder(value: string | undefined | null): boolean {
   return v === "" || (v.startsWith("[") && v.endsWith("]"));
 }
 
+/** Turns "07444 359371" into "tel:+447444359371" for click-to-call links. */
+export function telHref(phone: string): string {
+  const digits = phone.replace(/[^\d+]/g, "");
+  if (digits.startsWith("+")) return `tel:${digits}`;
+  if (digits.startsWith("44")) return `tel:+${digits}`;
+  if (digits.startsWith("0")) return `tel:+44${digits.slice(1)}`;
+  return `tel:${digits}`;
+}
+
 export const SITE = {
   /** Set NEXT_PUBLIC_SITE_URL in your environment once you have a domain. */
   url: (process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000").replace(/\/$/, ""),
+  tagline: "QUALITY SERVICE, FAIR PRICE",
   city: "Newcastle upon Tyne",
   region: "Tyne and Wear",
-  promise: "Straightforward room-by-room prices. No hourly rates. No hidden labour fees.",
+  promise: "Quality service, fair prices. Straightforward room-by-room painting prices with no hourly labour charges.",
+  /** Official logo file. Save your logo here: public/brand-logo.png */
+  logoPath: "/brand-logo.png",
+  hasBrandLogo: process.env.NEXT_PUBLIC_HAS_BRAND_LOGO === "1",
   serviceAreas: ["Newcastle upon Tyne", "Gosforth", "Jesmond", "Heaton", "Fenham", "Wallsend", "Gateshead", "Benton", "Kenton", "Byker", "Walker", "Denton Burn", "Low Fell", "Whickham"],
 } as const;
 
-/** Placeholder images. Replace the files in /public/images with your own photographs (same file names), or edit these paths. */
+/** Photos used on the homepage and service pages (files in /public/gallery). */
 export const IMAGES = {
-  hero: { src: "/images/hero-bedroom.svg", alt: "Freshly painted modern bedroom with soft neutral walls and crisp white skirting boards" },
-  bedroom: { src: "/images/service-bedroom.svg", alt: "Bedroom with newly painted walls in a calm neutral tone" },
-  livingRoom: { src: "/images/service-living-room.svg", alt: "Living room with freshly painted walls and a smooth white ceiling" },
-  skirting: { src: "/images/service-skirting.svg", alt: "Close-up of freshly glossed white skirting board against a painted wall" },
-  ceiling: { src: "/images/service-ceiling.svg", alt: "Smooth freshly painted white ceiling" },
+  hero: { src: "/gallery/bedroom-2-after.jpg", alt: "Freshly painted bedroom in a calm grey with crisp white skirting, painted by Tyne & Tees Painting" },
+  bedroom: { src: "/gallery/bedroom-1-after.jpg", alt: "Bedroom walls freshly painted in soft grey after full preparation" },
+  livingRoom: { src: "/gallery/living-room-1-after.jpg", alt: "Living room repainted in charcoal grey with white ceiling and skirting" },
+  skirting: { src: "/gallery/skirting-1-after.jpg", alt: "Skirting board restored and finished in smooth white gloss" },
+  ceiling: { src: "/gallery/bedroom-2-after.jpg", alt: "Bedroom with a freshly painted white ceiling and soft grey walls" },
 } as const;

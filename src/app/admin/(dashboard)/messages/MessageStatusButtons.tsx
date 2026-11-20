@@ -12,7 +12,7 @@ const OPTIONS = [
 export function MessageStatusButtons({ id, status }: { id: string; status: "new" | "replied" | "archived" }) {
   const [pending, start] = useTransition();
   return (
-    <div className="flex gap-1 rounded-lg bg-navy-50 p-1" role="group" aria-label="Message status">
+    <div className="flex gap-1 rounded-lg bg-ink-50 p-1" role="group" aria-label="Message status">
       {OPTIONS.map((o) => (
         <button
           key={o.id}
@@ -20,7 +20,7 @@ export function MessageStatusButtons({ id, status }: { id: string; status: "new"
           disabled={pending}
           aria-pressed={status === o.id}
           onClick={() => start(async () => void (await setMessageStatus(id, o.id)))}
-          className={`rounded-md px-3 py-1 text-xs font-medium ${status === o.id ? "bg-navy-900 text-white" : "text-navy-700 hover:bg-white"}`}
+          className={`rounded-md px-3 py-1 text-xs font-medium ${status === o.id ? "bg-ink-900 text-white" : "text-ink-700 hover:bg-white"}`}
         >
           {o.label}
         </button>

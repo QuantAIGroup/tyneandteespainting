@@ -25,10 +25,10 @@ export interface ServiceInfo {
 export const SERVICES: ServiceInfo[] = [
   {
     slug: "bedroom-painting",
-    name: "Bedroom Painting",
+    name: "Bedroom painting",
     shortName: "Bedrooms",
     image: IMAGES.bedroom,
-    summary: "Walls prepared and painted with two coats, finished with clean, straight cutting-in. Priced by wall area, not by the hour.",
+    summary: "Professional bedroom wall painting and preparation.",
     seoTitle: "Bedroom Painters in Newcastle | Fixed Room-by-Room Prices",
     seoDescription:
       "Bedroom painting in Newcastle upon Tyne with straightforward labour prices calculated from your room size. No hourly rates. Get an instant online estimate.",
@@ -48,10 +48,10 @@ export const SERVICES: ServiceInfo[] = [
   },
   {
     slug: "living-room-painting",
-    name: "Living Room Painting",
+    name: "Living room painting",
     shortName: "Living rooms",
     image: IMAGES.livingRoom,
-    summary: "Your main living space repainted with care – furniture protected, walls prepared and two full coats applied.",
+    summary: "Freshen up your living room with a clean, professional finish.",
     seoTitle: "Living Room Painters in Newcastle | Honest Labour Prices",
     seoDescription:
       "Professional living room painting across Newcastle, Gosforth, Jesmond and Gateshead. Transparent labour prices based on wall area – no hourly charges.",
@@ -71,10 +71,10 @@ export const SERVICES: ServiceInfo[] = [
   },
   {
     slug: "skirting-board-painting",
-    name: "Skirting Board Painting",
+    name: "Skirting board painting",
     shortName: "Skirting boards",
     image: IMAGES.skirting,
-    summary: "Skirting boards sanded, filled and finished in gloss, satin or eggshell for a crisp, hard-wearing finish.",
+    summary: "Refresh your existing skirting boards with a neat finish.",
     seoTitle: "Skirting Board Painting in Newcastle | Priced per Metre",
     seoDescription:
       "Skirting board painting in Newcastle upon Tyne, priced per linear metre. Sanding, filling and two coats included. Get your instant estimate online.",
@@ -93,7 +93,7 @@ export const SERVICES: ServiceInfo[] = [
   },
   {
     slug: "ceiling-painting",
-    name: "Ceiling Painting",
+    name: "Ceiling painting",
     shortName: "Ceilings",
     optional: true,
     image: IMAGES.ceiling,

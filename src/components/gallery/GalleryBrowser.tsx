@@ -2,64 +2,50 @@
 
 import Image from "next/image";
 import { useState } from "react";
-import type { GalleryCategory, GalleryEntry } from "@/lib/gallery";
-import { DemoBadge } from "@/components/ui/Placeholder";
+import type { GalleryCategory, GalleryEntry } from "@/lib/gallery-types";
 import { BeforeAfterSlider } from "./BeforeAfterSlider";
 
-export function GalleryBrowser({
-  items,
-  categories,
-  limitPerCategory,
-}: {
-  items: GalleryEntry[];
-  categories: { id: GalleryCategory; label: string }[];
-  limitPerCategory?: number;
-}) {
-  const [active, setActive] = useState<GalleryCategory>(categories[0].id);
-  const filtered = items.filter((i) => i.category === active).slice(0, limitPerCategory ?? Infinity);
-  const anyDemo = items.some((i) => i.isDemo);
+/** Before & after pairs with filter tabs. Drag the slider on each photo to compare. */
+export function GalleryBrowser({ items, categories, showTabs = true }: { items: GalleryEntry[]; categories: { id: GalleryCategory; label: string }[]; showTabs?: boolean }) {
+  const [active, setActive] = useState<GalleryCategory | "all">("all");
+  const filtered = active === "all" ? items : items.filter((i) => i.categories.includes(active));
+  const tabs = [{ id: "all" as const, label: "All" }, ...categories.filter((c) => items.some((i) => i.categories.includes(c.id)))];
 
   return (
     <div>
-      <div role="tablist" aria-label="Gallery categories" className="flex flex-wrap justify-center gap-2">
-        {categories.map((c) => (
-          <button
-            key={c.id}
-            role="tab"
-            type="button"
-            aria-selected={active === c.id}
-            onClick={() => setActive(c.id)}
-            className={`rounded-full px-5 py-2 text-sm font-medium transition-colors ${
-              active === c.id ? "bg-navy-900 text-white" : "bg-white text-navy-800 ring-1 ring-navy-900/12 hover:bg-sand-50"
-            }`}
-          >
-            {c.label}
-          </button>
-        ))}
-      </div>
-
-      {anyDemo && (
-        <p className="mx-auto mt-5 max-w-xl text-center text-sm text-navy-600">
-          <DemoBadge className="mr-2 align-middle">Illustration</DemoBadge>
-          These are illustrations to show how the gallery works – not photographs of completed jobs. Genuine before-and-after photos will appear here.
-        </p>
+      {showTabs && (
+        <div role="tablist" aria-label="Filter photos" className="flex flex-wrap justify-center gap-2">
+          {tabs.map((c) => (
+            <button
+              key={c.id}
+              role="tab"
+              type="button"
+              aria-selected={active === c.id}
+              onClick={() => setActive(c.id)}
+              className={`rounded-full px-5 py-2 text-sm font-semibold transition-all duration-200 ${
+                active === c.id ? "bg-brand-600 text-white shadow-md shadow-brand-600/25" : "bg-white text-ink-900 ring-1 ring-ink-950/10 hover:-translate-y-0.5 hover:ring-brand-600"
+              }`}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
       )}
 
-      <div role="tabpanel" className={`mt-8 grid gap-8 ${filtered.length > 1 ? "md:grid-cols-2" : "mx-auto max-w-3xl"}`}>
-        {filtered.length === 0 && <p className="text-center text-navy-600">Photos coming soon.</p>}
+      <div role={showTabs ? "tabpanel" : undefined} className={`grid gap-8 md:grid-cols-2 ${showTabs ? "mt-10" : ""}`}>
         {filtered.map((item) => (
-          <figure key={item.id} className="animate-fade-up">
+          <figure key={item.id} className="group animate-fade-up overflow-hidden rounded-3xl bg-white p-3 shadow-sm ring-1 ring-ink-950/6 transition-shadow duration-300 hover:shadow-xl">
             {item.beforeUrl ? (
               <BeforeAfterSlider before={item.beforeUrl} after={item.afterUrl} alt={item.title} />
             ) : (
-              <div className="relative aspect-[16/11] overflow-hidden rounded-lg bg-sand-100">
-                <Image src={item.afterUrl} alt={item.title} fill sizes="(min-width: 1024px) 50vw, 100vw" className="object-cover" unoptimized={item.afterUrl.endsWith(".svg")} />
+              <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-grey-100">
+                <Image src={item.afterUrl} alt={item.title} fill sizes="(min-width: 768px) 50vw, 100vw" className="object-cover" />
               </div>
             )}
-            <figcaption className="mt-3 flex flex-wrap items-center gap-2 text-sm text-navy-700">
-              <span className="font-medium text-navy-950">{item.title}</span>
-              {item.location && <span>· {item.location}</span>}
-              {item.isDemo && <DemoBadge>Illustration – not a real job</DemoBadge>}
+            <figcaption className="px-2 pt-4 pb-2">
+              <p className="text-lg font-bold text-ink-950">{item.title}</p>
+              {item.description && <p className="mt-1 text-[15px] text-ink-700">{item.description}</p>}
+              {item.location && <p className="mt-1 text-sm text-ink-600">{item.location}</p>}
             </figcaption>
           </figure>
         ))}

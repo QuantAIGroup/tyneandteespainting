@@ -29,7 +29,7 @@ function parseBusiness(value: unknown): BusinessSettings {
   };
 }
 
-async function readSettingsRow(key: "pricing" | "business"): Promise<unknown> {
+async function readSettingsRow(key: "pricing" | "business" | "payments"): Promise<unknown> {
   const supabase = createPublicClient();
   if (!supabase) return null;
   try {
@@ -61,6 +61,27 @@ export async function getBusinessSettings(): Promise<BusinessSettings> {
   return parseBusiness(await readSettingsRow("business"));
 }
 
+export interface PaymentSettings {
+  /** Default deposit percentage offered when you request a payment (1–100). */
+  defaultDepositPercent: number;
+}
+
+export const DEFAULT_PAYMENT_SETTINGS: PaymentSettings = { defaultDepositPercent: 50 };
+
+function parsePayments(value: unknown): PaymentSettings {
+  const v = (value ?? {}) as Partial<PaymentSettings>;
+  const pct = Number(v.defaultDepositPercent);
+  return { defaultDepositPercent: Number.isInteger(pct) && pct >= 1 && pct <= 100 ? pct : DEFAULT_PAYMENT_SETTINGS.defaultDepositPercent };
+}
+
+/** Payment settings (default deposit %). Cached, refreshed when you save in /admin/settings. */
+export async function getPaymentSettings(): Promise<PaymentSettings> {
+  "use cache";
+  cacheTag(SETTINGS_TAG);
+  cacheLife("hours");
+  return parsePayments(await readSettingsRow("payments"));
+}
+
 /**
  * Prices read straight from the database (no cache). Used when saving an enquiry
  * so the saved price always uses the latest prices.
@@ -73,4 +94,4 @@ export async function getPricingSettingsUncached(): Promise<PricingSettings> {
   return parsePricing(data?.value);
 }
 
-export { parseBusiness, parsePricing };
+export { parseBusiness, parsePayments, parsePricing };

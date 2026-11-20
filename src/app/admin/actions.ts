@@ -9,7 +9,8 @@ import { redirect } from "next/navigation";
 import { refresh, updateTag } from "next/cache";
 import { z } from "zod";
 import { requireAdmin } from "@/lib/auth";
-import { ENQUIRY_STATUSES, isUuid } from "@/lib/enquiry";
+import { isUuid } from "@/lib/enquiry";
+import { canSetStatusManually } from "@/lib/payments/booking";
 import { pricingSettingsSchema } from "@/lib/pricing/schema";
 import { GALLERY_TAG, SETTINGS_TAG } from "@/lib/settings";
 import { createSessionClient } from "@/lib/supabase/server";
@@ -25,20 +26,43 @@ async function db() {
 
 // ---------------- Enquiries ----------------
 
-const statusIds = ENQUIRY_STATUSES.map((s) => s.id) as [string, ...string[]];
-
+/**
+ * Change the booking status from the status menu. "Deposit paid" can never be
+ * chosen here – only a verified Stripe payment sets it – and a booking can't be
+ * confirmed/completed until the deposit is paid (the database enforces this too).
+ */
 export async function setEnquiryStatus(id: string, status: string): Promise<ActionState> {
-  if (!isUuid(id) || !statusIds.includes(status)) return { ok: false, message: "Invalid request" };
+  if (!isUuid(id)) return { ok: false, message: "Invalid request" };
   const supabase = await db();
+  const { data: current } = await supabase.from("enquiries").select("status, deposit_paid_at").eq("id", id).maybeSingle();
+  if (!current) return { ok: false, message: "Enquiry not found" };
+  const state = { status: current.status as string, depositPaid: Boolean(current.deposit_paid_at) };
+  if (!canSetStatusManually(status, state)) {
+    return {
+      ok: false,
+      message: state.depositPaid
+        ? "That status isn't available for a paid booking."
+        : "Use 'Agree final price' and 'Send deposit link' – bookings can only be confirmed after a verified deposit payment.",
+    };
+  }
   const now = new Date().toISOString();
   const patch: Record<string, unknown> = { status };
-  if (status === "contacted") patch.contacted_at = now;
-  if (status === "accepted") patch.accepted_at = now;
-  if (status === "completed") patch.completed_at = now;
+  if (status === "booking_confirmed") patch.booking_confirmed_at = now;
+  if (status === "work_completed") patch.completed_at = now;
   const { error } = await supabase.from("enquiries").update(patch).eq("id", id);
   if (error) return { ok: false, message: error.message };
   refresh();
   return { ok: true, message: "Status updated" };
+}
+
+/** Records that you've phoned/emailed the customer (doesn't change the booking status). */
+export async function markContacted(id: string): Promise<ActionState> {
+  if (!isUuid(id)) return { ok: false, message: "Invalid request" };
+  const supabase = await db();
+  const { error } = await supabase.from("enquiries").update({ contacted_at: new Date().toISOString() }).eq("id", id);
+  if (error) return { ok: false, message: error.message };
+  refresh();
+  return { ok: true, message: "Marked as contacted" };
 }
 
 export async function saveEnquiryNotes(id: string, _prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -117,10 +141,20 @@ export async function saveBusiness(_prev: ActionState, formData: FormData): Prom
   return { ok: true, message: "Business details saved and updated across the website." };
 }
 
+export async function savePaymentSettings(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const pct = Number(String(formData.get("defaultDepositPercent") ?? "").trim());
+  if (!Number.isInteger(pct) || pct < 1 || pct > 100) return { ok: false, message: "Deposit percentage must be a whole number from 1 to 100." };
+  const supabase = await db();
+  const { error } = await supabase.from("settings").upsert({ key: "payments", value: { defaultDepositPercent: pct } });
+  if (error) return { ok: false, message: error.message };
+  updateTag(SETTINGS_TAG);
+  return { ok: true, message: `Default deposit set to ${pct}%. This applies to new payment requests.` };
+}
+
 // ---------------- Gallery ----------------
 
 const galleryItemSchema = z.object({
-  category: z.enum(["bedrooms", "living_rooms", "skirting_boards"]),
+  category: z.enum(["bedrooms", "living_rooms", "skirting_boards", "wall_preparation"]),
   title: z.string().trim().min(2, "Please add a short title").max(100),
   location: z.string().trim().max(60).optional(),
   beforePath: z.string().max(300).optional(),

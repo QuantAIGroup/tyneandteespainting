@@ -27,11 +27,13 @@ import { PRICING_RULES } from "@/components/home/PricingPromise";
 import { createItem, validItems, validateDraft, type ItemDraft, type ItemKind, type Unit } from "./draft";
 import { ItemMeasurements } from "./ItemMeasurements";
 import { ItemCondition } from "./ItemCondition";
+import { RoomSummary } from "./RoomSummary";
 import { PhotoUploader, type UploadedPhoto } from "./PhotoUploader";
 import { QuoteBreakdown, ESTIMATE_STATEMENT } from "./QuoteBreakdown";
 import { RoomDiagram, SkirtingDiagram } from "./MeasureDiagram";
+import { CallToDiscuss } from "@/components/CallToDiscuss";
 
-const STEPS = ["Services", "Measurements", "Condition", "Photos", "Estimate", "Your details"] as const;
+const STEPS = ["Select your service", "Enter measurements", "Upload photographs", "Your estimate"] as const;
 
 const ADD_OPTIONS: { kind: ItemKind; label: string; note: string; icon: typeof BedDouble }[] = [
   { kind: "bedroom", label: "Bedroom", note: "Walls, priced per m²", icon: BedDouble },
@@ -55,7 +57,7 @@ const EMPTY_CUSTOMER: CustomerDraft = { fullName: "", email: "", phone: "", post
 
 const VALID_KINDS: ItemKind[] = ["bedroom", "living_room", "skirting", "ceiling"];
 
-export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingSettings; uploadsEnabled: boolean }) {
+export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent }: { pricing: PricingSettings; uploadsEnabled: boolean; phone: string; depositPercent: number }) {
   const searchParams = useSearchParams();
   const [items, setItems] = useState<ItemDraft[]>(() => {
     const add = searchParams.get("add") as ItemKind | null;
@@ -95,7 +97,7 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
       setShowErrors(true);
       return setStepError("Please check the highlighted measurements.");
     }
-    if (step === 3 && photos.some((p) => p.status === "uploading")) return setStepError("Please wait for your photos to finish uploading.");
+    if (step === 2 && photos.some((p) => p.status === "uploading")) return setStepError("Please wait for your photos to finish uploading.");
     goTo(step + 1);
   }
 
@@ -150,19 +152,22 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
   // ---------- Confirmation ----------
   if (reference) {
     return (
-      <div ref={topRef} className="mx-auto max-w-2xl scroll-mt-24 rounded-xl bg-white p-8 text-center shadow-sm ring-1 ring-navy-900/10 sm:p-12">
-        <CheckCircle2 className="mx-auto size-14 text-emerald-600" aria-hidden />
+      <div ref={topRef} className="mx-auto max-w-2xl scroll-mt-24 rounded-2xl bg-white p-8 text-center shadow-sm ring-1 ring-ink-900/10 sm:p-12">
+        <CheckCircle2 className="mx-auto size-14 text-brand-700" aria-hidden />
         <h2 className="mt-5 text-3xl">Thank you – your enquiry has been sent</h2>
-        <p className="mt-4 text-lg text-navy-700">Your enquiry reference is</p>
-        <p className="mt-2 inline-block rounded-lg bg-sand-50 px-5 py-3 font-mono text-2xl font-semibold tracking-wider text-navy-950 ring-1 ring-sand-200">{reference}</p>
-        <div className="mt-8 space-y-3 text-left text-[15px] leading-relaxed text-navy-800">
+        <p className="mt-4 text-lg text-ink-700">Your enquiry reference is</p>
+        <p className="mt-2 inline-block rounded-lg bg-grey-50 px-5 py-3 font-mono text-2xl font-semibold tracking-wider text-ink-950 ring-1 ring-grey-200">{reference}</p>
+        <div className="mt-8 text-left">
+          <CallToDiscuss phone={phone} depositPercent={depositPercent} compact />
+        </div>
+        <div className="mt-6 space-y-3 text-left text-[15px] leading-relaxed text-ink-800">
           <p>
-            <strong>What happens next:</strong> we&rsquo;ll review your measurements and photographs, then contact you by your preferred method to confirm your fixed quotation.
+            <strong>What happens next:</strong> we&rsquo;ll review your measurements and photographs. Give us a call (or we&rsquo;ll contact you by your preferred method) to talk through the job and agree your final price.
           </p>
           <p>
-            <strong>This is not a booking yet.</strong> Nothing is arranged and you are not committed to anything until you&rsquo;ve seen and approved your fixed quotation.
+            <strong>This is not a booking yet.</strong> Nothing has been charged and you are not committed to anything. A 50% deposit is only requested after we&rsquo;ve spoken and you&rsquo;ve agreed the final price.
           </p>
-          <p>Please keep your reference handy in case you need to get in touch.</p>
+          <p>Please keep your reference handy when you call.</p>
         </div>
         <Link href="/" className={buttonClasses("outline", "md", "mt-8")}>
           Back to the homepage
@@ -178,27 +183,27 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
         <ol className="flex gap-1.5">
           {STEPS.map((name, i) => (
             <li key={name} className="flex-1">
-              <div className={`h-1.5 rounded-full ${i <= step ? "bg-gold-500" : "bg-navy-900/10"}`} />
-              <span className={`mt-2 hidden text-xs font-medium sm:block ${i === step ? "text-navy-950" : "text-navy-600"}`} aria-current={i === step ? "step" : undefined}>
+              <div className={`h-1.5 rounded-full ${i <= step ? "bg-brand-600" : "bg-ink-900/10"}`} />
+              <span className={`mt-2 hidden text-xs font-medium sm:block ${i === step ? "text-ink-950" : "text-ink-600"}`} aria-current={i === step ? "step" : undefined}>
                 {i + 1}. {name}
               </span>
             </li>
           ))}
         </ol>
-        <p className="mt-3 text-sm font-medium text-navy-700 sm:hidden">
+        <p className="mt-3 text-sm font-medium text-ink-700 sm:hidden">
           Step {step + 1} of {STEPS.length}: {STEPS[step]}
         </p>
       </nav>
 
-      <div className={`grid gap-8 ${step >= 1 && step <= 3 ? "lg:grid-cols-[1fr_320px]" : ""}`}>
+      <div className={`grid gap-8 ${step >= 1 && step <= 2 ? "lg:grid-cols-[1fr_320px]" : ""}`}>
         <div className="min-w-0">
           {/* STEP 1: SERVICES */}
           {step === 0 && (
             <section aria-labelledby="step-services">
               <h2 id="step-services" className="text-2xl sm:text-3xl">
-                What would you like painted?
+                Select your service
               </h2>
-              <p className="mt-2 text-navy-700">Add each room separately – for example Bedroom 1, Bedroom 2 and the living room. You can add a ceiling to any room on the next step.</p>
+              <p className="mt-2 text-ink-700">Add each room separately – for example Bedroom 1, Bedroom 2 and the living room. You can add a ceiling to any room on the next step.</p>
               <div className="mt-6 grid gap-3 sm:grid-cols-2">
                 {ADD_OPTIONS.map(({ kind, label, note, icon: Icon }) => (
                   <button
@@ -206,14 +211,14 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
                     type="button"
                     onClick={() => addItem(kind)}
                     disabled={items.length >= LIMITS.maxItems}
-                    className="flex items-center gap-4 rounded-xl bg-white p-4 text-left ring-1 ring-navy-900/12 transition hover:bg-sand-50 hover:ring-gold-500 disabled:opacity-50"
+                    className="flex items-center gap-4 rounded-2xl bg-white p-4 text-left ring-1 ring-ink-900/12 transition hover:bg-grey-50 hover:ring-brand-600 disabled:opacity-50"
                   >
-                    <span className="grid size-11 shrink-0 place-items-center rounded-lg bg-sand-100 text-gold-700">
+                    <span className="grid size-11 shrink-0 place-items-center rounded-lg bg-grey-100 text-brand-700">
                       <Icon className="size-5" aria-hidden />
                     </span>
                     <span className="flex-1">
-                      <span className="block font-medium text-navy-950">+ Add {label.toLowerCase()}</span>
-                      <span className="block text-sm text-navy-600">{note}</span>
+                      <span className="block font-medium text-ink-950">+ Add {label.toLowerCase()}</span>
+                      <span className="block text-sm text-ink-600">{note}</span>
                     </span>
                   </button>
                 ))}
@@ -221,12 +226,12 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
 
               <h3 className="mt-10 font-sans text-lg font-semibold">Your quotation ({items.length})</h3>
               {items.length === 0 ? (
-                <p className="mt-3 rounded-lg bg-sand-50 p-5 text-navy-700">Nothing added yet. Choose from the options above.</p>
+                <p className="mt-3 rounded-lg bg-grey-50 p-5 text-ink-700">Nothing added yet. Choose from the options above.</p>
               ) : (
-                <ul className="mt-3 divide-y divide-navy-900/8 rounded-xl bg-white ring-1 ring-navy-900/10">
+                <ul className="mt-3 divide-y divide-ink-900/8 rounded-2xl bg-white ring-1 ring-ink-900/10">
                   {items.map((item) => (
                     <li key={item.id} className="flex items-center gap-3 px-4 py-3">
-                      <PaintRoller className="size-5 shrink-0 text-gold-600" aria-hidden />
+                      <PaintRoller className="size-5 shrink-0 text-brand-600" aria-hidden />
                       <label className="sr-only" htmlFor={`label-${item.id}`}>
                         Name for this item
                       </label>
@@ -237,11 +242,11 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
                           maxLength={60}
                           onChange={(e) => update(item.id, { label: e.target.value })}
                           onBlur={(e) => !e.target.value.trim() && update(item.id, { label: "Room" })}
-                          className="w-full rounded-md border border-transparent px-2 py-1.5 text-[15px] font-medium text-navy-950 hover:border-navy-900/15 focus:border-gold-500 focus:outline-none"
+                          className="w-full rounded-md border border-transparent px-2 py-1.5 text-[15px] font-medium text-ink-950 hover:border-ink-900/15 focus:border-brand-600 focus:outline-none"
                         />
-                        <Pencil className="pointer-events-none absolute right-2 top-1/2 size-3.5 -translate-y-1/2 text-navy-600/50" aria-hidden />
+                        <Pencil className="pointer-events-none absolute right-2 top-1/2 size-3.5 -translate-y-1/2 text-ink-600/50" aria-hidden />
                       </div>
-                      <button type="button" onClick={() => removeItem(item.id)} className="grid size-10 place-items-center rounded-md text-navy-600 hover:bg-red-50 hover:text-red-700">
+                      <button type="button" onClick={() => removeItem(item.id)} className="grid size-10 place-items-center rounded-md text-ink-600 hover:bg-red-50 hover:text-red-700">
                         <Trash2 className="size-4" aria-hidden />
                         <span className="sr-only">Remove {item.label}</span>
                       </button>
@@ -258,14 +263,14 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
               <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
                   <h2 id="step-measure" className="text-2xl sm:text-3xl">
-                    Your measurements
+                    Enter your measurements
                   </h2>
-                  <p className="mt-2 text-navy-700">A tape measure is all you need. Round to the nearest 5 cm – it doesn&rsquo;t need to be exact.</p>
+                  <p className="mt-2 text-ink-700">A tape measure is all you need. Round to the nearest 5 cm – it doesn&rsquo;t need to be exact.</p>
                 </div>
-                <fieldset className="flex rounded-lg bg-white p-1 ring-1 ring-navy-900/12">
+                <fieldset className="flex rounded-lg bg-white p-1 ring-1 ring-ink-900/12">
                   <legend className="sr-only">Measurement units</legend>
                   {(["m", "cm"] as const).map((u) => (
-                    <label key={u} className={`cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium ${unit === u ? "bg-navy-900 text-white" : "text-navy-800 hover:bg-sand-50"}`}>
+                    <label key={u} className={`cursor-pointer rounded-md px-4 py-1.5 text-sm font-medium ${unit === u ? "bg-ink-900 text-white" : "text-ink-800 hover:bg-grey-50"}`}>
                       <input type="radio" name="unit" value={u} checked={unit === u} onChange={() => setUnit(u)} className="sr-only" />
                       {u === "m" ? "Metres" : "Centimetres"}
                     </label>
@@ -273,13 +278,13 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
                 </fieldset>
               </div>
 
-              <details className="mt-6 rounded-xl bg-sand-50 ring-1 ring-sand-200" open>
-                <summary className="cursor-pointer px-5 py-4 font-medium text-navy-950">Where do I measure?</summary>
+              <details className="mt-6 rounded-2xl bg-grey-50 ring-1 ring-grey-200" open>
+                <summary className="cursor-pointer px-5 py-4 font-medium text-ink-950">Where do I measure?</summary>
                 <div className="grid gap-6 px-5 pb-5 md:grid-cols-2">
                   {hasRooms && (
                     <div>
                       <RoomDiagram />
-                      <ul className="mt-3 space-y-1.5 text-sm text-navy-800">
+                      <ul className="mt-3 space-y-1.5 text-sm text-ink-800">
                         <li>
                           <strong>Length and width:</strong> measure along the floor from one wall to the opposite wall.
                         </li>
@@ -295,7 +300,7 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
                   {hasSkirting && (
                     <div>
                       <SkirtingDiagram />
-                      <p className="mt-3 text-sm text-navy-800">
+                      <p className="mt-3 text-sm text-ink-800">
                         <strong>Skirting boards:</strong> measure the skirting along each wall and add the lengths together. Don&rsquo;t include doorways.
                       </p>
                     </div>
@@ -305,91 +310,73 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
 
               <div className="mt-6 space-y-6">
                 {items.map((item) => (
-                  <fieldset key={item.id} className="rounded-xl bg-white p-5 ring-1 ring-navy-900/10 sm:p-6">
+                  <fieldset key={item.id} className="rounded-2xl bg-white p-5 ring-1 ring-ink-900/10 sm:p-6">
                     <legend className="sr-only">{item.label}</legend>
-                    <h3 aria-hidden className="mb-5 font-serif text-xl">
+                    <h3 aria-hidden className="mb-5 font-bold tracking-tight text-xl">
                       {item.label}
                     </h3>
                     <ItemMeasurements item={item} unit={unit} errors={showErrors ? validations[item.id].errors : {}} update={(p) => update(item.id, p)} />
+                    <div className="mt-6 border-t border-ink-950/8 pt-5">
+                      <h4 className="mb-1 text-[15px] font-bold text-ink-950">Condition</h4>
+                      <p className="mb-4 text-sm text-ink-600">Small nail holes and minor cracks are included. Bigger repairs need a manual quotation.</p>
+                      <ItemCondition item={item} update={(p) => update(item.id, p)} />
+                    </div>
                   </fieldset>
                 ))}
               </div>
             </section>
           )}
 
-          {/* STEP 3: CONDITION */}
+          {/* STEP 3: PHOTOS */}
           {step === 2 && (
-            <section aria-labelledby="step-condition">
-              <h2 id="step-condition" className="text-2xl sm:text-3xl">
-                Room condition
-              </h2>
-              <p className="mt-2 text-navy-700">
-                Filling small nail holes and minor cracks is included. Bigger repairs, wallpaper removal or damp need to be seen first, so those items get a manual quotation instead of a guess.
-              </p>
-              <div className="mt-6 space-y-6">
-                {items.map((item) => (
-                  <div key={item.id} className="rounded-xl bg-white p-5 ring-1 ring-navy-900/10 sm:p-6">
-                    <h3 className="mb-5 font-serif text-xl">{item.label}</h3>
-                    <ItemCondition item={item} update={(p) => update(item.id, p)} standardCoats={pricing.standardCoats} />
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
-          {/* STEP 4: PHOTOS */}
-          {step === 3 && (
             <section aria-labelledby="step-photos">
               <h2 id="step-photos" className="text-2xl sm:text-3xl">
-                Add photographs <span className="text-lg font-normal text-navy-600">(optional, up to {LIMITS.maxPhotos})</span>
+                Upload photographs <span className="text-lg font-normal text-ink-600">(optional, up to {LIMITS.maxPhotos})</span>
               </h2>
-              <p className="mt-2 mb-6 text-navy-700">Photos let us check the condition of your walls so we can confirm your fixed price without a wasted visit.</p>
-              <div className="rounded-xl bg-white p-5 ring-1 ring-navy-900/10 sm:p-6">
+              <p className="mt-2 mb-6 text-ink-700">Photographs help us assess the condition of your room, so we can confirm your price without a wasted visit. Your price is still based on your measurements.</p>
+              <div className="rounded-2xl bg-white p-5 ring-1 ring-ink-900/10 sm:p-6">
                 <PhotoUploader getDraftId={getDraftId} photos={photos} setPhotos={setPhotos} enabled={uploadsEnabled} />
               </div>
             </section>
           )}
 
-          {/* STEP 5: ESTIMATE */}
-          {step === 4 && (
+          {/* STEP 4: ESTIMATE + SEND DETAILS */}
+          {step === 3 && (
             <section aria-labelledby="step-estimate">
               <h2 id="step-estimate" className="text-2xl sm:text-3xl">
-                Your estimate
+                Your estimated labour price
               </h2>
               <div className="mt-6 grid gap-8 lg:grid-cols-[1.15fr_0.85fr]">
-                <div>
+                <div className="space-y-4">
+                  <RoomSummary items={items} />
                   <QuoteBreakdown quote={quote} />
-                  <p className="mt-4 rounded-lg bg-navy-50 p-4 text-[15px] leading-relaxed text-navy-900 ring-1 ring-navy-100">{ESTIMATE_STATEMENT}</p>
+                  <p className="rounded-lg bg-grey-50 p-4 text-[15px] leading-relaxed text-ink-900">
+                    <strong>Labour only.</strong> Paint, primer, filler and other materials are not included. There are no hidden charges – if the job turns out to need more work, we&rsquo;ll explain why and agree it with you first.
+                  </p>
+                  <p className="text-sm leading-relaxed text-ink-600">{ESTIMATE_STATEMENT}</p>
                 </div>
-                <div>
-                  <h3 className="font-sans text-lg font-semibold">What this price means</h3>
-                  <ul className="mt-4 space-y-4">
+                <div className="space-y-6">
+                  <CallToDiscuss phone={phone} depositPercent={depositPercent} compact />
+                  <ul className="space-y-3">
                     {PRICING_RULES.map(({ icon: Icon, title, text }) => (
                       <li key={title} className="flex gap-3">
-                        <Icon className="mt-0.5 size-5 shrink-0 text-gold-600" aria-hidden />
-                        <span className="text-[15px]">
-                          <strong className="text-navy-950">{title}.</strong> <span className="text-navy-700">{text}</span>
+                        <Icon className="mt-0.5 size-5 shrink-0 text-brand-600" aria-hidden />
+                        <span className="text-sm">
+                          <strong className="text-ink-950">{title}.</strong> <span className="text-ink-700">{text}</span>
                         </span>
                       </li>
                     ))}
                   </ul>
-                  <p className="mt-5 text-sm leading-relaxed text-navy-600">
-                    If we find the job is different from the details given (for example, more repairs are needed), we&rsquo;ll explain why, send a revised quotation, and only go ahead with your approval.
-                  </p>
                 </div>
               </div>
-            </section>
-          )}
 
-          {/* STEP 6: DETAILS */}
-          {step === 5 && (
-            <section aria-labelledby="step-details">
-              <h2 id="step-details" className="text-2xl sm:text-3xl">
-                Request your fixed quotation
-              </h2>
-              <p className="mt-2 text-navy-700">Check your quotation below, then tell us how to reach you. Sending this doesn&rsquo;t book anything or commit you to anything.</p>
-              <div className="mt-6 grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
-                <form onSubmit={submit} noValidate className="space-y-5 rounded-xl bg-white p-5 ring-1 ring-navy-900/10 sm:p-6">
+              <div className="mt-12 border-t border-ink-950/8 pt-10">
+                <h3 className="text-2xl">Send us your estimate</h3>
+                <p className="mt-2 max-w-2xl text-ink-700">
+                  Free and no obligation. We&rsquo;ll review your details and photographs, talk it through with you and confirm your fixed labour price. Nothing is charged and nothing is booked yet.
+                </p>
+                <div className="mt-6 max-w-2xl">
+                <form onSubmit={submit} noValidate className="space-y-5 rounded-2xl bg-white p-5 ring-1 ring-ink-900/10 sm:p-6">
                   <Field label="Full name" htmlFor="q-name" required error={customerErrors.fullName}>
                     <Input id="q-name" autoComplete="name" value={customer.fullName} invalid={!!customerErrors.fullName} onChange={(e) => setCustomer({ ...customer, fullName: e.target.value })} />
                   </Field>
@@ -423,7 +410,7 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
                     <label htmlFor="q-website">Website</label>
                     <input id="q-website" tabIndex={-1} autoComplete="off" value={customer.website} onChange={(e) => setCustomer({ ...customer, website: e.target.value })} />
                   </div>
-                  <p className="text-sm text-navy-600">
+                  <p className="text-sm text-ink-600">
                     We&rsquo;ll only use your details to deal with this enquiry. See our{" "}
                     <Link href="/privacy" className="underline underline-offset-2">
                       privacy notice
@@ -433,15 +420,9 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
                   {submitError && <Alert tone="error">{submitError}</Alert>}
                   <Button type="submit" size="lg" disabled={submitting} className="w-full">
                     {submitting ? <Loader2 className="size-5 animate-spin" aria-hidden /> : null}
-                    {submitting ? "Sending your enquiry…" : "Send my enquiry"}
+                    {submitting ? "Sending…" : "Send my estimate"}
                   </Button>
                 </form>
-                <div className="space-y-4">
-                  <QuoteBreakdown quote={quote} showWorking={false} title="Your quotation" />
-                  <p className="text-sm text-navy-700">
-                    Photos attached: <strong>{photos.filter((p) => p.status === "done").length}</strong>
-                  </p>
-                  <p className="rounded-lg bg-navy-50 p-4 text-sm leading-relaxed text-navy-900 ring-1 ring-navy-100">{ESTIMATE_STATEMENT}</p>
                 </div>
               </div>
             </section>
@@ -454,7 +435,7 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
           )}
 
           {/* Navigation */}
-          <div className="mt-8 flex flex-col-reverse gap-3 border-t border-navy-900/8 pt-6 sm:flex-row sm:justify-between">
+          <div className="mt-8 flex flex-col-reverse gap-3 border-t border-ink-900/8 pt-6 sm:flex-row sm:justify-between">
             {step > 0 ? (
               <Button type="button" variant="outline" onClick={() => goTo(step - 1)}>
                 <ArrowLeft className="size-4" aria-hidden /> Back
@@ -462,23 +443,23 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
             ) : (
               <span />
             )}
-            {step < 5 && (
+            {step < 3 && (
               <Button type="button" size="lg" onClick={next}>
-                {step === 3 ? "See my estimate" : step === 4 ? "Request my fixed quotation" : "Continue"} <ArrowRight className="size-4" aria-hidden />
+                {step === 2 ? "See my estimate" : "Continue"} <ArrowRight className="size-4" aria-hidden />
               </Button>
             )}
           </div>
         </div>
 
         {/* Live running total (steps 2–4) */}
-        {step >= 1 && step <= 3 && (
+        {step >= 1 && step <= 2 && (
           <aside aria-label="Running estimate" className="hidden lg:sticky lg:top-24 lg:block lg:self-start">
-            <div className="rounded-xl bg-navy-950 p-6 text-white">
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-gold-300">Running estimate</p>
-              <p className="mt-2 font-serif text-4xl" aria-live="polite">
+            <div className="rounded-2xl bg-ink-950 p-6 text-white">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand-300">Running estimate</p>
+              <p className="mt-2 font-bold tracking-tight text-4xl" aria-live="polite">
                 {quote.hasPricedItems ? formatPence(quote.totalPence) : "—"}
               </p>
-              <p className="mt-1 text-sm text-navy-100/70">Labour only · paint not included</p>
+              <p className="mt-1 text-sm text-ink-100/70">Labour only · paint not included</p>
               <ul className="mt-5 space-y-2 border-t border-white/10 pt-4 text-sm">
                 {items.map((item) => {
                   const lines = quote.lines.filter((l) => l.itemId === item.id);
@@ -486,29 +467,29 @@ export function QuoteCalculator({ pricing, uploadsEnabled }: { pricing: PricingS
                   const manual = lines.some((l) => l.status === "manual");
                   return (
                     <li key={item.id} className="flex justify-between gap-3">
-                      <span className="truncate text-navy-100/85">{item.label}</span>
+                      <span className="truncate text-ink-100/85">{item.label}</span>
                       <span className="shrink-0 font-medium">{lines.length === 0 ? "…" : manual ? "Manual quote" : formatPence(total)}</span>
                     </li>
                   );
                 })}
               </ul>
-              {quote.needsReview && <p className="mt-4 text-xs text-gold-300">Some items are flagged for review – see the estimate step.</p>}
+              {quote.needsReview && <p className="mt-4 text-xs text-brand-300">Some items are flagged for review – see the estimate step.</p>}
             </div>
           </aside>
         )}
       </div>
 
       {/* Mobile: slim running total pinned to the bottom of the screen */}
-      {step >= 1 && step <= 3 && (
+      {step >= 1 && step <= 2 && (
         <>
           <div className="h-20 lg:hidden" aria-hidden />
-          <div className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-navy-950 px-5 py-3 text-white lg:hidden" aria-live="polite">
+          <div className="fixed inset-x-0 bottom-[72px] z-30 border-t border-white/10 bg-ink-950 px-5 py-3 text-white lg:hidden" aria-live="polite">
             <div className="flex items-center justify-between gap-4">
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-gold-300">Running estimate</p>
-                <p className="text-xs text-navy-100/70">Labour only · paint not included</p>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-brand-300">Running estimate</p>
+                <p className="text-xs text-ink-100/70">Labour only · paint not included</p>
               </div>
-              <p className="font-serif text-2xl">{quote.hasPricedItems ? formatPence(quote.totalPence) : "—"}</p>
+              <p className="font-bold tracking-tight text-2xl">{quote.hasPricedItems ? formatPence(quote.totalPence) : "—"}</p>
             </div>
           </div>
         </>

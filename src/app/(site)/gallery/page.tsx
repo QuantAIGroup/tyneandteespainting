@@ -13,7 +13,7 @@ export const metadata: Metadata = {
 export default async function GalleryPage() {
   const items = await getGallery();
   return (
-    <section className="bg-cream py-16 sm:py-20">
+    <section className="bg-grey-50 py-16 sm:py-20">
       <Container>
         <SectionHeading as="h1" eyebrow="Before & after" title="Our work" intro="Drag the slider on each picture to compare before and after." />
         <div className="mt-10">

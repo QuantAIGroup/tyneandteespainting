@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { getBusinessSettings } from "@/lib/settings";
 import { Container } from "@/components/ui/Container";
-import { PlaceholderValue } from "@/components/ui/Placeholder";
+import { isPlaceholder, telHref } from "@/config/site";
 
 export const metadata: Metadata = {
   title: "Privacy Notice",
@@ -18,9 +18,9 @@ export default async function PrivacyPage() {
   return (
     <Container className="max-w-3xl py-16 sm:py-20">
       <h1 className="text-4xl">Privacy notice</h1>
-      <div className="mt-8 space-y-5 text-[16px] leading-relaxed text-navy-800 [&_h2]:mt-10 [&_h2]:text-2xl">
+      <div className="mt-8 space-y-5 text-[16px] leading-relaxed text-ink-800 [&_h2]:mt-10 [&_h2]:text-2xl">
         <p>
-          This notice explains how <PlaceholderValue value={business.name} /> uses the information you give us through this website.
+          This notice explains how {business.name} uses the information you give us through this website.
         </p>
         <h2>What we collect</h2>
         <p>
@@ -41,7 +41,11 @@ export default async function PrivacyPage() {
         <p>We keep enquiry details for as long as needed to deal with your enquiry and any work, and for our legal and accounting obligations. You can ask us to delete your details at any time.</p>
         <h2>Your rights</h2>
         <p>
-          You can ask to see, correct or delete the information we hold about you. Contact us at <PlaceholderValue value={business.email} />. You can also complain to the
+          You can ask to see, correct or delete the information we hold about you. Contact us on{" "}
+          <a href={telHref(business.phone)} className="font-semibold text-brand-600">
+            {business.phone}
+          </a>
+          {!isPlaceholder(business.email) && <> or at {business.email}</>}. You can also complain to the
           Information Commissioner&rsquo;s Office (ico.org.uk).
         </p>
       </div>

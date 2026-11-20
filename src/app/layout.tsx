@@ -1,14 +1,13 @@
 import type { Metadata, Viewport } from "next";
 import "@fontsource-variable/inter";
-import "@fontsource/libre-baskerville/400.css";
-import "@fontsource/libre-baskerville/700.css";
+import "@fontsource-variable/plus-jakarta-sans";
 import "./globals.css";
 import { SITE } from "@/config/site";
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE.url),
   title: {
-    default: "Bedroom & Living Room Painters Newcastle | Fixed Room Prices",
+    default: "Tyne & Tees Painting | Bedroom & Living Room Painters Newcastle",
     template: "%s",
   },
   description:
@@ -16,13 +15,13 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     locale: "en_GB",
-    siteName: "Room painting in Newcastle",
+    siteName: "Tyne & Tees Painting",
   },
   robots: { index: true, follow: true },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#13223a",
+  themeColor: "#000000",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

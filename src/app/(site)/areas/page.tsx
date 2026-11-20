@@ -16,7 +16,7 @@ export const metadata: Metadata = {
 export default function AreasPage() {
   return (
     <>
-      <section className="bg-cream py-16 sm:py-20">
+      <section className="bg-grey-50 py-16 sm:py-20">
         <Container>
           <SectionHeading
             as="h1"
@@ -26,13 +26,13 @@ export default function AreasPage() {
           />
           <ul className="mx-auto mt-12 grid max-w-4xl gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {SITE.serviceAreas.map((area) => (
-              <li key={area} className="flex items-center gap-3 rounded-lg bg-white px-5 py-4 ring-1 ring-navy-900/8">
-                <MapPin className="size-5 text-gold-600" aria-hidden />
-                <span className="font-medium text-navy-950">{area}</span>
+              <li key={area} className="flex items-center gap-3 rounded-lg bg-white px-5 py-4 ring-1 ring-ink-900/8">
+                <MapPin className="size-5 text-brand-600" aria-hidden />
+                <span className="font-medium text-ink-950">{area}</span>
               </li>
             ))}
           </ul>
-          <p className="mx-auto mt-8 max-w-2xl text-center text-navy-700">
+          <p className="mx-auto mt-8 max-w-2xl text-center text-ink-700">
             Not on the list? If you&rsquo;re near Newcastle, put your postcode into the calculator and we&rsquo;ll let you know if we can help.
           </p>
         </Container>
@@ -40,9 +40,9 @@ export default function AreasPage() {
       <section className="py-16">
         <Container className="grid gap-6 md:grid-cols-2">
           {SERVICES.map((s) => (
-            <Link key={s.slug} href={`/services/${s.slug}`} className="rounded-xl p-6 ring-1 ring-navy-900/8 transition hover:bg-sand-50">
+            <Link key={s.slug} href={`/services/${s.slug}`} className="rounded-2xl p-6 ring-1 ring-ink-900/8 transition hover:bg-grey-50">
               <h2 className="text-xl">{s.name} in Newcastle</h2>
-              <p className="mt-2 text-[15px] text-navy-700">{s.summary}</p>
+              <p className="mt-2 text-[15px] text-ink-700">{s.summary}</p>
             </Link>
           ))}
         </Container>

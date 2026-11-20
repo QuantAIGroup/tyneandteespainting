@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { telHref } from "@/config/site";
 import { notFound } from "next/navigation";
 import { ArrowLeft, Mail, MapPin, Phone } from "lucide-react";
 import { requireAdmin } from "@/lib/auth";
@@ -9,6 +10,7 @@ import { createSessionClient } from "@/lib/supabase/server";
 import { QuoteBreakdown } from "@/components/calculator/QuoteBreakdown";
 import { StatusBadge } from "../../StatusBadge";
 import { EnquiryActions, NotesForm } from "./EnquiryControls";
+import { PaymentPanel } from "./PaymentPanel";
 
 const SURFACE: Record<string, string> = { good: "Good condition", minor_defects: "Small nail holes / minor cracks (included)", major_damage: "Larger cracks or damage", bare_wood: "Bare / new wood" };
 const yesNo = (b: boolean) => (b ? "Yes" : "No");
@@ -41,13 +43,13 @@ function ItemDetails({ item }: { item: QuoteItem }) {
   rows.push(["Coats", String(item.coats)]);
 
   return (
-    <div className="rounded-lg bg-white p-5 ring-1 ring-navy-900/10">
-      <h3 className="font-sans text-base font-semibold text-navy-950">{item.label}</h3>
+    <div className="rounded-lg bg-white p-5 ring-1 ring-ink-900/10">
+      <h3 className="font-sans text-base font-semibold text-ink-950">{item.label}</h3>
       <dl className="mt-3 grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-[160px_1fr]">
         {rows.map(([k, v]) => (
           <div key={k} className="contents">
-            <dt className="text-navy-600">{k}</dt>
-            <dd className="text-navy-950">{v}</dd>
+            <dt className="text-ink-600">{k}</dt>
+            <dd className="text-ink-950">{v}</dd>
           </div>
         ))}
       </dl>
@@ -76,11 +78,11 @@ export default async function EnquiryPage({ params }: PageProps<"/admin/enquirie
   const breakdown = enquiry.breakdown as QuoteResult;
   const snapshot = enquiry.pricing_snapshot as PricingSettings;
   const created = new Date(enquiry.created_at as string).toLocaleString("en-GB", { dateStyle: "full", timeStyle: "short", timeZone: "Europe/London" });
-  const tel = String(enquiry.phone).replace(/\s/g, "");
+  const tel = telHref(String(enquiry.phone));
 
   return (
     <div>
-      <Link href="/admin" className="inline-flex items-center gap-1.5 text-sm text-navy-700 hover:text-navy-950">
+      <Link href="/admin" className="inline-flex items-center gap-1.5 text-sm text-ink-700 hover:text-ink-950">
         <ArrowLeft className="size-4" aria-hidden /> All enquiries
       </Link>
 
@@ -88,43 +90,43 @@ export default async function EnquiryPage({ params }: PageProps<"/admin/enquirie
         <h1 className="font-mono text-3xl">{enquiry.reference as string}</h1>
         <StatusBadge status={enquiry.status as string} />
       </div>
-      <p className="mt-1 text-navy-600">Received {created}</p>
+      <p className="mt-1 text-ink-600">Received {created}</p>
 
       <div className="mt-6">
-        <EnquiryActions id={id} status={enquiry.status as string} />
+        <EnquiryActions id={id} status={enquiry.status as string} depositPaid={Boolean(enquiry.deposit_paid_at)} contactedAt={(enquiry.contacted_at as string | null) ?? null} />
       </div>
 
       <div className="mt-8 grid gap-8 lg:grid-cols-[1fr_400px]">
         <div className="space-y-8">
-          <section className="rounded-xl bg-white p-6 ring-1 ring-navy-900/10">
+          <section className="rounded-xl bg-white p-6 ring-1 ring-ink-900/10">
             <h2 className="font-sans text-lg font-semibold">Customer</h2>
-            <p className="mt-3 text-xl font-medium text-navy-950">{enquiry.full_name as string}</p>
+            <p className="mt-3 text-xl font-medium text-ink-950">{enquiry.full_name as string}</p>
             <ul className="mt-3 space-y-2 text-[15px]">
               <li className="flex items-center gap-2">
-                <Phone className="size-4 text-gold-600" aria-hidden />
-                <a href={`tel:${tel}`} className="underline-offset-2 hover:underline">
+                <Phone className="size-4 text-brand-600" aria-hidden />
+                <a href={tel} className="underline-offset-2 hover:underline">
                   {enquiry.phone as string}
                 </a>
               </li>
               <li className="flex items-center gap-2">
-                <Mail className="size-4 text-gold-600" aria-hidden />
+                <Mail className="size-4 text-brand-600" aria-hidden />
                 <a href={`mailto:${enquiry.email}?subject=Your painting quotation ${enquiry.reference}`} className="underline-offset-2 hover:underline">
                   {enquiry.email as string}
                 </a>
               </li>
               <li className="flex items-center gap-2">
-                <MapPin className="size-4 text-gold-600" aria-hidden /> {enquiry.postcode as string}
+                <MapPin className="size-4 text-brand-600" aria-hidden /> {enquiry.postcode as string}
               </li>
             </ul>
             <dl className="mt-4 grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-[160px_1fr]">
-              <dt className="text-navy-600">Preferred contact</dt>
+              <dt className="text-ink-600">Preferred contact</dt>
               <dd className="capitalize">{enquiry.preferred_contact as string}</dd>
-              <dt className="text-navy-600">Preferred start</dt>
+              <dt className="text-ink-600">Preferred start</dt>
               <dd>{enquiry.preferred_start_date ? new Date(enquiry.preferred_start_date as string).toLocaleDateString("en-GB", { dateStyle: "long" }) : "Not given"}</dd>
             </dl>
             {enquiry.comments && (
-              <div className="mt-4 rounded-lg bg-sand-50 p-4 text-[15px] whitespace-pre-wrap text-navy-900">
-                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-navy-600">Customer comments</p>
+              <div className="mt-4 rounded-lg bg-grey-50 p-4 text-[15px] whitespace-pre-wrap text-ink-900">
+                <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-600">Customer comments</p>
                 {enquiry.comments as string}
               </div>
             )}
@@ -142,26 +144,27 @@ export default async function EnquiryPage({ params }: PageProps<"/admin/enquirie
           <section>
             <h2 className="font-sans text-lg font-semibold">Photographs ({photos.length})</h2>
             {photos.length === 0 ? (
-              <p className="mt-2 text-navy-600">No photos were uploaded.</p>
+              <p className="mt-2 text-ink-600">No photos were uploaded.</p>
             ) : (
               <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
                 {signed.map((p) => (
-                  <a key={p.path} href={p.signedUrl} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-lg bg-sand-100 ring-1 ring-navy-900/10">
+                  <a key={p.path} href={p.signedUrl} target="_blank" rel="noreferrer" className="block aspect-square overflow-hidden rounded-lg bg-grey-100 ring-1 ring-ink-900/10">
                     {/* eslint-disable-next-line @next/next/no-img-element -- short-lived private signed URL */}
                     <img src={p.signedUrl} alt="Customer photo" className="size-full object-cover transition hover:scale-105" />
                   </a>
                 ))}
               </div>
             )}
-            <p className="mt-2 text-xs text-navy-600">Photo links are private and expire after one hour. Refresh the page for new links.</p>
+            <p className="mt-2 text-xs text-ink-600">Photo links are private and expire after one hour. Refresh the page for new links.</p>
           </section>
         </div>
 
         <aside className="space-y-6">
-          <QuoteBreakdown quote={breakdown} title="Calculated labour estimate" />
-          <details className="rounded-lg bg-white p-4 text-sm ring-1 ring-navy-900/10">
+          <PaymentPanel enquiry={enquiry} items={items} estimatePence={breakdown.hasPricedItems ? breakdown.totalPence : 0} />
+          <QuoteBreakdown quote={breakdown} title="Online estimate (calculated)" />
+          <details className="rounded-lg bg-white p-4 text-sm ring-1 ring-ink-900/10">
             <summary className="cursor-pointer font-medium">Prices used for this estimate</summary>
-            <ul className="mt-3 space-y-1 text-navy-700">
+            <ul className="mt-3 space-y-1 text-ink-700">
               <li>Bedroom: £{snapshot.bedroom.ratePerSqm}/m², minimum £{snapshot.bedroom.minimumCharge}</li>
               <li>Living room: £{snapshot.livingRoom.ratePerSqm}/m², minimum £{snapshot.livingRoom.minimumCharge}</li>
               <li>Skirting: £{snapshot.skirting.ratePerMetre}/m, minimum £{snapshot.skirting.minimumCharge}</li>

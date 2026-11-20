@@ -12,8 +12,8 @@ type Update = (patch: Partial<ItemDraft>) => void;
 function AreaNote({ label, value, unit }: { label: string; value: number | null; unit: string }) {
   if (value === null || !Number.isFinite(value) || value <= 0) return null;
   return (
-    <p className="mt-3 text-sm text-navy-700">
-      {label}: <strong className="text-navy-950">{round2(value).toFixed(2)} {unit}</strong>
+    <p className="mt-3 text-sm text-ink-700">
+      {label}: <strong className="text-ink-950">{round2(value).toFixed(2)} {unit}</strong>
     </p>
   );
 }
@@ -28,7 +28,7 @@ function RoomMeasurements({ item, unit, errors, update }: { item: RoomDraft; uni
   return (
     <div>
       <fieldset>
-        <legend className="mb-2 text-sm font-medium text-navy-900">How would you like to measure?</legend>
+        <legend className="mb-2 text-sm font-medium text-ink-900">How would you like to measure?</legend>
         <div className="grid gap-2 sm:grid-cols-2">
           {(
             [
@@ -38,12 +38,12 @@ function RoomMeasurements({ item, unit, errors, update }: { item: RoomDraft; uni
           ).map(([mode, title, text]) => (
             <label
               key={mode}
-              className={`flex cursor-pointer gap-3 rounded-lg p-3.5 ring-1 transition ${item.measurementMode === mode ? "bg-sand-50 ring-gold-500" : "ring-navy-900/12 hover:bg-sand-50/60"}`}
+              className={`flex cursor-pointer gap-3 rounded-lg p-3.5 ring-1 transition ${item.measurementMode === mode ? "bg-grey-50 ring-brand-600" : "ring-ink-900/12 hover:bg-grey-50/60"}`}
             >
-              <input type="radio" name={`${item.id}-mode`} checked={item.measurementMode === mode} onChange={() => update({ measurementMode: mode })} className="mt-1 accent-navy-900" />
+              <input type="radio" name={`${item.id}-mode`} checked={item.measurementMode === mode} onChange={() => update({ measurementMode: mode })} className="mt-1 accent-ink-900" />
               <span>
-                <span className="block text-[15px] font-medium text-navy-950">{title}</span>
-                <span className="block text-sm text-navy-600">{text}</span>
+                <span className="block text-[15px] font-medium text-ink-950">{title}</span>
+                <span className="block text-sm text-ink-600">{text}</span>
               </span>
             </label>
           ))}
@@ -61,14 +61,14 @@ function RoomMeasurements({ item, unit, errors, update }: { item: RoomDraft; uni
         </div>
       ) : (
         <div className="mt-5 space-y-3">
-          <p className="text-sm text-navy-700">Measure the width and height of each wall you want painted. Include chimney breasts and alcove walls as separate walls.</p>
+          <p className="text-sm text-ink-700">Measure the width and height of each wall you want painted. Include chimney breasts and alcove walls as separate walls.</p>
           {errors.walls && (
             <p role="alert" className="text-sm font-medium text-red-700">
               {errors.walls}
             </p>
           )}
           {item.walls.map((wall, index) => (
-            <div key={wall.key} className="grid grid-cols-[1fr_1fr_auto] items-start gap-3 rounded-lg bg-sand-50/60 p-3">
+            <div key={wall.key} className="grid grid-cols-[1fr_1fr_auto] items-start gap-3 rounded-lg bg-grey-50/60 p-3">
               <NumberInput
                 key={`${wall.key}-w-${unit}`}
                 id={`${wall.key}-w-${unit}`}
@@ -91,7 +91,7 @@ function RoomMeasurements({ item, unit, errors, update }: { item: RoomDraft; uni
                 type="button"
                 onClick={() => update({ walls: item.walls.filter((w) => w.key !== wall.key) })}
                 disabled={item.walls.length <= 1}
-                className="mt-7 grid size-10 place-items-center rounded-md text-navy-600 hover:bg-white hover:text-red-700 disabled:opacity-30"
+                className="mt-7 grid size-10 place-items-center rounded-md text-ink-600 hover:bg-white hover:text-red-700 disabled:opacity-30"
               >
                 <Trash2 className="size-4" aria-hidden />
                 <span className="sr-only">Remove wall {index + 1}</span>
@@ -99,7 +99,7 @@ function RoomMeasurements({ item, unit, errors, update }: { item: RoomDraft; uni
             </div>
           ))}
           {item.walls.length < LIMITS.maxWalls && (
-            <button type="button" onClick={() => update({ walls: [...item.walls, newWall()] })} className="inline-flex items-center gap-1.5 text-sm font-medium text-gold-700 hover:text-gold-600">
+            <button type="button" onClick={() => update({ walls: [...item.walls, newWall()] })} className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-700 hover:text-brand-600">
               <Plus className="size-4" aria-hidden /> Add another wall
             </button>
           )}
@@ -107,12 +107,12 @@ function RoomMeasurements({ item, unit, errors, update }: { item: RoomDraft; uni
         </div>
       )}
 
-      <div className="mt-6 rounded-lg p-4 ring-1 ring-navy-900/10">
+      <div className="mt-6 rounded-lg p-4 ring-1 ring-ink-900/10">
         <label className="flex cursor-pointer items-start gap-3">
-          <input type="checkbox" checked={item.includeCeiling} onChange={(e) => update({ includeCeiling: e.target.checked })} className="mt-1 size-4 accent-navy-900" />
+          <input type="checkbox" checked={item.includeCeiling} onChange={(e) => update({ includeCeiling: e.target.checked })} className="mt-1 size-4 accent-ink-900" />
           <span>
-            <span className="block text-[15px] font-medium text-navy-950">Also paint the ceiling (optional extra)</span>
-            <span className="block text-sm text-navy-600">Priced separately: ceiling area = length × width.</span>
+            <span className="block text-[15px] font-medium text-ink-950">Also paint the ceiling (optional extra)</span>
+            <span className="block text-sm text-ink-600">Priced separately: ceiling area = length × width.</span>
           </span>
         </label>
         {item.includeCeiling && item.measurementMode === "walls" && (

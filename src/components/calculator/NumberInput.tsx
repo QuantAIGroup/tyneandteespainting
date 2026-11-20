@@ -36,7 +36,7 @@ export function NumberInput({
 
   return (
     <div>
-      <label htmlFor={id} className="mb-1.5 block text-sm font-medium text-navy-900">
+      <label htmlFor={id} className="mb-1.5 block text-sm font-medium text-ink-900">
         {label}
       </label>
       <div className="relative">
@@ -55,14 +55,14 @@ export function NumberInput({
           }}
           className={`${inputClasses} pr-12`}
         />
-        <span className="pointer-events-none absolute inset-y-0 right-3.5 flex items-center text-sm text-navy-600">{unit}</span>
+        <span className="pointer-events-none absolute inset-y-0 right-3.5 flex items-center text-sm text-ink-600">{unit}</span>
       </div>
       {error ? (
         <p id={`${id}-error`} role="alert" className="mt-1.5 text-sm font-medium text-red-700">
           {error}
         </p>
       ) : hint ? (
-        <p id={`${id}-hint`} className="mt-1.5 text-xs text-navy-600">
+        <p id={`${id}-hint`} className="mt-1.5 text-xs text-ink-600">
           {hint}
         </p>
       ) : null}

@@ -103,7 +103,7 @@ export function PhotoUploader({
 
   if (!enabled) {
     return (
-      <div className="rounded-lg bg-sand-50 p-5 text-sm text-navy-700 ring-1 ring-sand-200">
+      <div className="rounded-lg bg-grey-50 p-5 text-sm text-ink-700 ring-1 ring-grey-200">
         Photo uploads aren&rsquo;t switched on yet. You can still send your enquiry – we may ask you to email photos instead.
       </div>
     );
@@ -111,7 +111,7 @@ export function PhotoUploader({
 
   return (
     <div>
-      <ul className="mb-5 grid gap-1.5 text-[15px] text-navy-800">
+      <ul className="mb-5 grid gap-1.5 text-[15px] text-ink-800">
         <li>• One photograph of each wall, where possible</li>
         <li>• A photograph of the whole room</li>
         <li>• Close-ups of any cracks, holes or damage</li>
@@ -119,35 +119,35 @@ export function PhotoUploader({
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         {photos.map((p) => (
-          <div key={p.localId} className="relative aspect-square overflow-hidden rounded-lg bg-sand-100 ring-1 ring-navy-900/10">
+          <div key={p.localId} className="relative aspect-square overflow-hidden rounded-lg bg-grey-100 ring-1 ring-ink-900/10">
             {p.previewUrl ? (
               // eslint-disable-next-line @next/next/no-img-element -- local blob preview
               <img src={p.previewUrl} alt={`Preview of ${p.fileName}`} className="size-full object-cover" />
             ) : (
-              <div className="grid size-full place-items-center p-3 text-center text-xs text-navy-600">{p.fileName}</div>
+              <div className="grid size-full place-items-center p-3 text-center text-xs text-ink-600">{p.fileName}</div>
             )}
             <button
               type="button"
               onClick={() => remove(p.localId)}
-              className="absolute right-1.5 top-1.5 grid size-8 place-items-center rounded-full bg-white/95 text-navy-900 shadow hover:text-red-700"
+              className="absolute right-1.5 top-1.5 grid size-8 place-items-center rounded-full bg-white/95 text-ink-900 shadow hover:text-red-700"
             >
               <X className="size-4" aria-hidden />
               <span className="sr-only">Remove {p.fileName}</span>
             </button>
-            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-navy-950/80 to-transparent p-2 text-xs text-white">
+            <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-ink-950/80 to-transparent p-2 text-xs text-white">
               {p.status === "uploading" && (
                 <div aria-live="polite">
                   <div className="flex items-center gap-1.5">
                     <Loader2 className="size-3.5 animate-spin" aria-hidden /> Uploading {p.progress}%
                   </div>
                   <div className="mt-1 h-1 overflow-hidden rounded bg-white/30" role="progressbar" aria-valuenow={p.progress} aria-valuemin={0} aria-valuemax={100} aria-label={`Upload progress for ${p.fileName}`}>
-                    <div className="h-full bg-gold-400 transition-all" style={{ width: `${p.progress}%` }} />
+                    <div className="h-full bg-brand-400 transition-all" style={{ width: `${p.progress}%` }} />
                   </div>
                 </div>
               )}
               {p.status === "done" && (
                 <span className="flex items-center gap-1.5">
-                  <CheckCircle2 className="size-3.5 text-emerald-300" aria-hidden /> Uploaded
+                  <CheckCircle2 className="size-3.5 text-brand-200" aria-hidden /> Uploaded
                 </span>
               )}
               {p.status === "error" && (
@@ -163,10 +163,10 @@ export function PhotoUploader({
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
-            className="flex aspect-square flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-navy-900/20 bg-white p-3 text-center text-sm text-navy-700 transition hover:border-gold-500 hover:bg-sand-50"
+            className="flex aspect-square flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-ink-900/20 bg-white p-3 text-center text-sm text-ink-700 transition hover:border-brand-600 hover:bg-grey-50"
           >
-            <Camera className="size-7 text-gold-600" aria-hidden />
-            <span className="font-medium text-navy-950">Add photos</span>
+            <Camera className="size-7 text-brand-600" aria-hidden />
+            <span className="font-medium text-ink-950">Add photos</span>
             <span className="text-xs">
               {remaining} of {LIMITS.maxPhotos} left
             </span>
@@ -174,10 +174,10 @@ export function PhotoUploader({
         )}
       </div>
       <input ref={inputRef} type="file" accept={ACCEPT} multiple className="sr-only" onChange={(e) => onFiles(e.target.files)} aria-label="Choose photos to upload" tabIndex={-1} />
-      <p className="mt-3 text-sm text-navy-600">
+      <p className="mt-3 text-sm text-ink-600">
         JPG, PNG or WEBP, up to {MAX_MB} MB each. Photos are private – only we can see them.
       </p>
-      <p className="mt-2 text-sm text-navy-600">Photos help us check the condition of your room. Your price is always based on the measurements you entered, not the photos.</p>
+      <p className="mt-2 text-sm text-ink-600">Photos help us check the condition of your room. Your price is always based on the measurements you entered, not the photos.</p>
     </div>
   );
 }

@@ -27,22 +27,9 @@ export const customerDetailsSchema = z.object({
 
 export type CustomerDetails = z.infer<typeof customerDetailsSchema>;
 
-export const ENQUIRY_STATUSES = [
-  { id: "new", label: "New" },
-  { id: "contacted", label: "Contacted" },
-  { id: "quote_sent", label: "Fixed quote sent" },
-  { id: "accepted", label: "Quote accepted" },
-  { id: "scheduled", label: "Job scheduled" },
-  { id: "completed", label: "Job completed" },
-  { id: "declined", label: "Customer declined" },
-  { id: "cancelled", label: "Cancelled" },
-] as const;
-
-export type EnquiryStatus = (typeof ENQUIRY_STATUSES)[number]["id"];
-
-export function statusLabel(status: string): string {
-  return ENQUIRY_STATUSES.find((s) => s.id === status)?.label ?? status;
-}
+// Enquiry statuses are the booking statuses (see lib/payments/booking.ts)
+export { BOOKING_STATUSES as ENQUIRY_STATUSES, bookingStatusLabel as statusLabel } from "@/lib/payments/booking";
+export type { BookingStatus as EnquiryStatus } from "@/lib/payments/booking";
 
 export function normalisePostcode(postcode: string): string {
   const compact = postcode.replace(/\s+/g, "").toUpperCase();

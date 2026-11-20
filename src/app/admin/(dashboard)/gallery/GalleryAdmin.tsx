@@ -62,7 +62,7 @@ export function GalleryUploadForm({ categories }: { categories: { id: string; la
   }
 
   return (
-    <form onSubmit={onSubmit} className="rounded-xl bg-white p-6 ring-1 ring-navy-900/10">
+    <form onSubmit={onSubmit} className="rounded-xl bg-white p-6 ring-1 ring-ink-900/10">
       <h2 className="font-sans text-lg font-semibold">Add before-and-after photos</h2>
       <div className="mt-5 grid gap-5 md:grid-cols-3">
         <Field label="Category" htmlFor="category" required>
@@ -87,7 +87,7 @@ export function GalleryUploadForm({ categories }: { categories: { id: string; la
           <Input id="after" name="after" type="file" accept="image/jpeg,image/png,image/webp" required />
         </Field>
       </div>
-      <p className="mt-4 text-sm text-navy-600">For the slider to look right, take the before and after photos from the same spot. Landscape photos work best.</p>
+      <p className="mt-4 text-sm text-ink-600">For the slider to look right, take the before and after photos from the same spot. Landscape photos work best.</p>
       <div className="mt-5 flex flex-wrap items-center gap-4">
         <Button type="submit" disabled={busy}>
           {busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : <Upload className="size-4" aria-hidden />}
@@ -117,7 +117,7 @@ export function GalleryItemControls({ id, published }: { id: string; published: 
       >
         Delete
       </Button>
-      {!published && <span className="self-center text-xs text-navy-600">Hidden</span>}
+      {!published && <span className="self-center text-xs text-ink-600">Hidden</span>}
     </div>
   );
 }

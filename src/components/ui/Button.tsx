@@ -5,20 +5,20 @@ type Variant = "primary" | "secondary" | "outline" | "ghost" | "danger";
 type Size = "sm" | "md" | "lg";
 
 const base =
-  "inline-flex items-center justify-center gap-2 rounded-md font-medium transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gold-500";
+  "inline-flex items-center justify-center gap-2 rounded-full font-semibold transition-all duration-200 hover:-translate-y-0.5 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600";
 
 const variants: Record<Variant, string> = {
-  primary: "bg-navy-900 text-white hover:bg-navy-800 shadow-sm",
-  secondary: "bg-gold-500 text-white hover:bg-gold-600 shadow-sm",
-  outline: "border border-navy-900/20 bg-white text-navy-900 hover:border-navy-900/40 hover:bg-sand-50",
-  ghost: "text-navy-800 hover:bg-sand-100",
+  primary: "bg-brand-600 text-white hover:bg-brand-700 shadow-md shadow-brand-600/25 hover:shadow-lg hover:shadow-brand-600/30", // royal blue – main buttons
+  secondary: "bg-ink-950 text-white hover:bg-ink-800 shadow-sm", // black
+  outline: "border-2 border-ink-950/15 bg-white text-ink-950 hover:border-brand-600 hover:text-brand-600",
+  ghost: "text-ink-800 hover:bg-grey-50",
   danger: "bg-red-700 text-white hover:bg-red-800",
 };
 
 const sizes: Record<Size, string> = {
   sm: "h-9 px-3 text-sm",
-  md: "h-11 px-5 text-[15px]",
-  lg: "h-13 px-7 text-base",
+  md: "h-12 px-6 text-[15px]",
+  lg: "h-14 px-8 text-base",
 };
 
 export function buttonClasses(variant: Variant = "primary", size: Size = "md", extra = "") {

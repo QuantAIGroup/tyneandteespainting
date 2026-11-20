@@ -2,32 +2,42 @@
 
 /*
  * DESIGN SYSTEM
- * Navy typography, warm beige backgrounds, subtle gold accents.
+ * Brand colours and typography for Tyne & Tees Painting.
  * Change a colour here and it updates across the whole site.
  */
 @theme {
-  --color-navy-950: #0d1828;
-  --color-navy-900: #13223a;
-  --color-navy-800: #1c3150;
-  --color-navy-700: #2a4466;
-  --color-navy-600: #46607f;
-  --color-navy-100: #e6ebf2;
-  --color-navy-50: #f3f6fa;
+  /*
+   * TYNE & TEES PAINTING BRAND – matches the official logo.
+   * Royal blue #0012DA · Black #000000 · White #FFFFFF
+   * Change a value here and it updates across the whole website.
+   */
+  --color-brand-50: #eef0ff;
+  --color-brand-100: #dfe3ff;
+  --color-brand-200: #bcc4ff;
+  --color-brand-300: #8a97ff;
+  --color-brand-400: #4d5cf0;
+  --color-brand-500: #2236e8;
+  --color-brand-600: #0012da; /* ROYAL BLUE – from the logo */
+  --color-brand-700: #000fb3;
+  --color-brand-800: #000c8c;
+  --color-brand-900: #000a6e;
 
-  --color-cream: #fbf8f3;
-  --color-sand-50: #f8f3eb;
-  --color-sand-100: #f2eadc;
-  --color-sand-200: #e6d9c3;
-  --color-sand-300: #d5c3a5;
+  --color-ink: #000000; /* BLACK – headings, text, logo text */
+  --color-ink-950: #000000;
+  --color-ink-900: #141414;
+  --color-ink-800: #2b2b2b;
+  --color-ink-700: #444444;
+  --color-ink-600: #5c5c5c;
+  --color-ink-100: #e8e8e8;
+  --color-ink-50: #f6f6f6;
 
-  --color-gold-300: #d8bf8f;
-  --color-gold-400: #c4a46b;
-  --color-gold-500: #ad8a4f;
-  --color-gold-600: #8f703c;
-  --color-gold-700: #6f5630;
+  --color-grey-50: #f6f7fb; /* very light blue-grey for gentle section backgrounds */
+  --color-grey-100: #eef0f6;
+  --color-grey-200: #e2e5ee;
+  --color-grey-300: #cdd2de;
 
-  --font-serif: "Libre Baskerville", Georgia, "Times New Roman", serif;
-  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-serif: "Plus Jakarta Sans Variable", "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-sans: "Plus Jakarta Sans Variable", "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
 
   --animate-fade-up: fade-up 0.6s ease-out both;
 
@@ -49,19 +59,19 @@
     -webkit-text-size-adjust: 100%;
   }
   body {
-    @apply bg-white font-sans text-navy-900 antialiased;
+    @apply bg-white font-sans text-ink-900 antialiased;
   }
   h1,
   h2,
   h3 {
-    @apply font-serif text-navy-950;
-    letter-spacing: -0.01em;
+    @apply font-sans font-extrabold text-ink-950;
+    letter-spacing: -0.03em;
   }
   ::selection {
-    @apply bg-gold-300/50;
+    @apply bg-brand-200;
   }
   :focus-visible {
-    @apply outline-2 outline-offset-2 outline-gold-500;
+    @apply outline-2 outline-offset-2 outline-brand-600;
   }
 }
 

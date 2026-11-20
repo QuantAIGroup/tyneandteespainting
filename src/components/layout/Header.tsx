@@ -1,50 +1,37 @@
 import Link from "next/link";
 import { Phone } from "lucide-react";
 import { getBusinessSettings } from "@/lib/settings";
-import { isPlaceholder } from "@/config/site";
-import { ButtonLink } from "@/components/ui/Button";
+import { telHref } from "@/config/site";
+import { BrandLogo } from "@/components/brand/BrandLogo";
 import { Container } from "@/components/ui/Container";
 import { MobileNav } from "./MobileNav";
-import { Logo } from "./Logo";
+import { NavLinks } from "./NavLinks";
 
 export const NAV_LINKS = [
-  { href: "/#services", label: "Services" },
+  { href: "/", label: "Home" },
+  { href: "/services", label: "Our Services" },
   { href: "/quote", label: "Prices" },
-  { href: "/gallery", label: "Our work" },
-  { href: "/areas", label: "Areas" },
+  { href: "/gallery", label: "Our Work" },
   { href: "/contact", label: "Contact" },
 ];
 
 export async function Header() {
   const business = await getBusinessSettings();
-  const phoneSet = !isPlaceholder(business.phone);
-
   return (
-    <header className="sticky top-0 z-40 border-b border-navy-900/8 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/85">
-      <Container className="flex h-18 items-center justify-between gap-6">
-        <Logo name={business.name} logoUrl={business.logoUrl} />
-
-        <nav aria-label="Main" className="hidden items-center gap-1 lg:flex">
-          {NAV_LINKS.map((link) => (
-            <Link key={link.href} href={link.href} className="rounded-md px-3 py-2 text-[15px] font-medium text-navy-800 transition-colors hover:bg-sand-50 hover:text-navy-950">
-              {link.label}
-            </Link>
-          ))}
-        </nav>
-
-        <div className="hidden items-center gap-4 lg:flex">
-          {phoneSet && (
-            <a href={`tel:${business.phone.replace(/\s/g, "")}`} className="flex items-center gap-2 text-[15px] font-medium text-navy-800 hover:text-navy-950">
-              <Phone className="size-4 text-gold-600" aria-hidden />
-              {business.phone}
-            </a>
-          )}
-          <ButtonLink href="/quote" size="sm" className="h-10 px-4">
-            Get your price
-          </ButtonLink>
-        </div>
-
-        <MobileNav links={NAV_LINKS} phone={phoneSet ? business.phone : null} />
+    <header className="sticky top-0 z-40 border-b border-ink-950/8 bg-white">
+      <Container className="flex h-20 items-center justify-between gap-6 sm:h-24">
+        <Link href="/" aria-label={`${business.name} – home`} className="shrink-0">
+          <BrandLogo name={business.name} logoUrl={business.logoUrl} />
+        </Link>
+        <NavLinks links={NAV_LINKS} />
+        <a
+          href={telHref(business.phone)}
+          className="hidden h-11 items-center gap-2 rounded-full bg-brand-600 px-5 text-[15px] font-bold text-white shadow-md shadow-brand-600/25 transition-all hover:-translate-y-0.5 hover:bg-brand-700 lg:inline-flex"
+        >
+          <Phone className="size-4" aria-hidden />
+          CALL US: {business.phone}
+        </a>
+        <MobileNav links={NAV_LINKS} />
       </Container>
     </header>
   );

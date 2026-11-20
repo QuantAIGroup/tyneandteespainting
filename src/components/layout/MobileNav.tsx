@@ -3,18 +3,14 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Menu, Phone, X } from "lucide-react";
-import { buttonClasses } from "@/components/ui/Button";
+import { Menu, X } from "lucide-react";
+import { isActive } from "./NavLinks";
 
-export function MobileNav({ links, phone }: { links: { href: string; label: string }[]; phone: string | null }) {
+export function MobileNav({ links }: { links: { href: string; label: string }[] }) {
   const pathname = usePathname();
   // The menu remembers which page it was opened on, so it closes automatically after navigating.
   const [openOn, setOpenOn] = useState<string | null>(null);
   const open = openOn === pathname;
-  const setOpen = (value: boolean | ((v: boolean) => boolean)) => {
-    const next = typeof value === "function" ? value(open) : value;
-    setOpenOn(next ? pathname : null);
-  };
 
   useEffect(() => {
     document.body.style.overflow = open ? "hidden" : "";
@@ -27,34 +23,32 @@ export function MobileNav({ links, phone }: { links: { href: string; label: stri
     <div className="lg:hidden">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpenOn(open ? null : pathname)}
         aria-expanded={open}
         aria-controls="mobile-menu"
-        className="grid size-11 place-items-center rounded-md text-navy-900 hover:bg-sand-50"
+        className="grid size-11 place-items-center rounded-md text-ink-950 hover:bg-grey-50"
       >
         {open ? <X className="size-6" /> : <Menu className="size-6" />}
         <span className="sr-only">{open ? "Close menu" : "Open menu"}</span>
       </button>
-
       {open && (
-        <div id="mobile-menu" className="fixed inset-x-0 top-18 bottom-0 z-50 overflow-y-auto border-t border-navy-900/8 bg-white px-5 pb-10 pt-4">
+        <div id="mobile-menu" className="fixed inset-x-0 top-20 bottom-[72px] sm:top-24 z-50 overflow-y-auto border-t border-ink-950/8 bg-white px-5 pb-10 pt-2">
           <nav aria-label="Mobile" className="flex flex-col">
-            {links.map((link) => (
-              <Link key={link.href} href={link.href} onClick={() => setOpen(false)} className="border-b border-navy-900/6 py-4 font-serif text-xl text-navy-950">
-                {link.label}
-              </Link>
-            ))}
+            {links.map((link) => {
+              const active = isActive(pathname, link.href);
+              return (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  onClick={() => setOpenOn(null)}
+                  aria-current={active ? "page" : undefined}
+                  className={`border-b border-ink-950/6 py-4 text-xl font-bold ${active ? "text-brand-600" : "text-ink-950"}`}
+                >
+                  {link.label}
+                </Link>
+              );
+            })}
           </nav>
-          <div className="mt-8 flex flex-col gap-3">
-            <Link href="/quote" onClick={() => setOpen(false)} className={buttonClasses("primary", "lg", "w-full")}>
-              Calculate your painting price
-            </Link>
-            {phone && (
-              <a href={`tel:${phone.replace(/\s/g, "")}`} className={buttonClasses("outline", "lg", "w-full")}>
-                <Phone className="size-4" /> Call {phone}
-              </a>
-            )}
-          </div>
         </div>
       )}
     </div>

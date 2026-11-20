@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { getPricingSettings } from "@/lib/settings";
+import { getBusinessSettings, getPaymentSettings, getPricingSettings } from "@/lib/settings";
 import { QuoteCalculator } from "@/components/calculator/QuoteCalculator";
 import { Container } from "@/components/ui/Container";
 
@@ -17,17 +17,17 @@ function uploadsConfigured() {
 }
 
 export default async function QuotePage() {
-  const pricing = await getPricingSettings();
+  const [pricing, business, payments] = await Promise.all([getPricingSettings(), getBusinessSettings(), getPaymentSettings()]);
   return (
-    <div className="bg-cream">
+    <div className="bg-white">
       <Container className="py-12 sm:py-16">
         <div className="mb-10 max-w-2xl">
-          <p className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-gold-600">Instant price calculator</p>
+          <p className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-brand-600">Instant price calculator</p>
           <h1 className="text-3xl leading-tight sm:text-4xl">Calculate your painting price</h1>
-          <p className="mt-4 text-lg text-navy-700">Room-by-room labour prices worked out from your own measurements. No hourly rates, no hidden labour fees – and no need to wait in for a visit.</p>
+          <p className="mt-4 text-lg text-ink-700">Room-by-room labour prices worked out from your own measurements. No hourly rates, no hidden labour fees – and no need to wait in for a visit. Online estimates are completely free.</p>
         </div>
-        <Suspense fallback={<div className="h-96 animate-pulse rounded-xl bg-white/60" aria-label="Loading calculator" />}>
-          <QuoteCalculator pricing={pricing} uploadsEnabled={uploadsConfigured()} />
+        <Suspense fallback={<div className="h-96 animate-pulse rounded-2xl bg-white/60" aria-label="Loading calculator" />}>
+          <QuoteCalculator pricing={pricing} uploadsEnabled={uploadsConfigured()} phone={business.phone} depositPercent={payments.defaultDepositPercent} />
         </Suspense>
       </Container>
     </div>

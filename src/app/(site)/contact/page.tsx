@@ -11,7 +11,7 @@ export const metadata: Metadata = {
 export default async function ContactPage() {
   const business = await getBusinessSettings();
   return (
-    <div className="bg-cream">
+    <div className="bg-grey-50">
       <ContactSection business={business} headingLevel="h1" />
     </div>
   );

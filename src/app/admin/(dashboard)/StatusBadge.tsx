@@ -1,16 +1,17 @@
 import { statusLabel } from "@/lib/enquiry";
 
 const COLOURS: Record<string, string> = {
-  new: "bg-blue-100 text-blue-900",
-  contacted: "bg-sky-100 text-sky-900",
-  quote_sent: "bg-violet-100 text-violet-900",
-  accepted: "bg-emerald-100 text-emerald-900",
-  scheduled: "bg-teal-100 text-teal-900",
-  completed: "bg-green-200 text-green-950",
-  declined: "bg-navy-100 text-navy-700",
-  cancelled: "bg-navy-100 text-navy-700",
+  awaiting_consultation: "bg-brand-50 text-brand-700",
+  price_agreed: "bg-grey-100 text-ink-900",
+  deposit_requested: "bg-brand-50 text-brand-900",
+  deposit_paid: "bg-brand-100 text-brand-900",
+  booking_confirmed: "bg-brand-100 text-brand-900",
+  work_completed: "bg-brand-600 text-white",
+  balance_paid: "bg-ink-950 text-white",
+  declined: "bg-ink-100 text-ink-700",
+  cancelled: "bg-ink-100 text-ink-700",
 };
 
 export function StatusBadge({ status }: { status: string }) {
-  return <span className={`inline-block whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${COLOURS[status] ?? "bg-navy-100"}`}>{statusLabel(status)}</span>;
+  return <span className={`inline-block whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold ${COLOURS[status] ?? "bg-ink-100"}`}>{statusLabel(status)}</span>;
 }

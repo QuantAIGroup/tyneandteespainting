@@ -1,12 +1,13 @@
 import Image from "next/image";
 import Link from "next/link";
-import { ArrowRight, Plus } from "lucide-react";
+import { ArrowRight, Info } from "lucide-react";
 import { SERVICES, type ServiceInfo } from "@/config/services";
 import { formatPounds } from "@/lib/pricing/engine";
 import type { PricingSettings } from "@/lib/pricing/types";
 import { buttonClasses } from "@/components/ui/Button";
 import { Container, SectionHeading } from "@/components/ui/Container";
 
+/** "From" prices come from the minimum charges in /admin/settings. */
 export function startingPrice(service: ServiceInfo, pricing: PricingSettings): { from: string; detail: string } {
   switch (service.calculatorItem) {
     case "bedroom":
@@ -20,45 +21,37 @@ export function startingPrice(service: ServiceInfo, pricing: PricingSettings): {
   }
 }
 
-export function Services({ pricing }: { pricing: PricingSettings }) {
+export function Services({ pricing, headingLevel = "h2" }: { pricing: PricingSettings; headingLevel?: "h1" | "h2" }) {
   const core = SERVICES.filter((s) => !s.optional);
-  const ceiling = SERVICES.find((s) => s.optional)!;
-  const ceilingPrice = startingPrice(ceiling, pricing);
+  const ceiling = startingPrice(SERVICES.find((s) => s.optional)!, pricing);
 
   return (
-    <section id="services" className="scroll-mt-20 bg-cream py-20 sm:py-24">
+    <section id="services" className="scroll-mt-24 bg-white py-16 sm:py-24">
       <Container>
-        <SectionHeading
-          eyebrow="What we do"
-          title="Three services, done properly"
-          intro="We concentrate on the rooms we know best. Every price below is labour only and is worked out from the size of your room – never by the hour."
-        />
+        <SectionHeading as={headingLevel} eyebrow="Our services" title="What we can paint for you" intro="Bedrooms, living rooms and skirting boards across Newcastle – with clear starting prices for labour, never by the hour." />
 
-        <div className="mt-14 grid gap-7 md:grid-cols-3">
+        <div className="mt-12 grid gap-6 md:grid-cols-3">
           {core.map((service) => {
             const price = startingPrice(service, pricing);
+            const Heading = headingLevel === "h1" ? "h2" : "h3";
             return (
-              <article key={service.slug} className="group flex flex-col overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-navy-900/6 transition-shadow hover:shadow-md">
-                <div className="relative aspect-[16/11] overflow-hidden">
-                  <Image
-                    src={service.image.src}
-                    alt={service.image.alt}
-                    fill
-                    sizes="(min-width: 768px) 33vw, 100vw"
-                    className="object-cover transition-transform duration-500 group-hover:scale-[1.03]"
-                    unoptimized={service.image.src.endsWith(".svg")}
-                  />
-                </div>
+              <article key={service.slug} className="group flex flex-col overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ring-ink-950/8 transition-all duration-300 hover:-translate-y-1 hover:shadow-xl">
+                <Link href={`/services/${service.slug}`} className="relative block aspect-[16/11] overflow-hidden" tabIndex={-1} aria-hidden>
+                  <Image src={service.image.src} alt="" fill sizes="(min-width: 768px) 33vw, 100vw" className="object-cover transition-transform duration-500 group-hover:scale-105" />
+                </Link>
                 <div className="flex flex-1 flex-col p-6">
-                  <h3 className="text-xl">{service.name}</h3>
-                  <p className="mt-2.5 flex-1 text-[15px] leading-relaxed text-navy-700">{service.summary}</p>
-                  <div className="mt-5 border-t border-navy-900/8 pt-4">
-                    <p className="text-sm text-navy-600">Labour from</p>
-                    <p className="font-serif text-2xl text-navy-950">{price.from}</p>
-                    <p className="text-sm text-navy-600">{price.detail}</p>
+                  <Heading className="text-xl">
+                    <Link href={`/services/${service.slug}`} className="hover:text-brand-600">
+                      {service.name}
+                    </Link>
+                  </Heading>
+                  <p className="mt-2 flex-1 text-[15px] leading-relaxed text-ink-700">{service.summary}</p>
+                  <div className="mt-5">
+                    <p className="text-sm text-ink-600">Starting labour price</p>
+                    <p className="text-3xl font-extrabold text-brand-600">{price.from}</p>
                   </div>
-                  <Link href={`/services/${service.slug}#prices`} className={buttonClasses("outline", "md", "mt-5 w-full")}>
-                    View Prices <ArrowRight className="size-4" aria-hidden />
+                  <Link href={`/quote?add=${service.calculatorItem}`} className={buttonClasses("primary", "md", "mt-5 w-full font-bold")}>
+                    Get a Quote <ArrowRight className="size-4" aria-hidden />
                   </Link>
                 </div>
               </article>
@@ -66,21 +59,19 @@ export function Services({ pricing }: { pricing: PricingSettings }) {
           })}
         </div>
 
-        <div className="mt-8 flex flex-col items-start gap-4 rounded-xl bg-white p-6 ring-1 ring-gold-400/40 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-start gap-4">
-            <span className="grid size-10 shrink-0 place-items-center rounded-full bg-gold-500 text-white">
-              <Plus className="size-5" aria-hidden />
+        <div className="mt-8 grid gap-4 md:grid-cols-2">
+          <p className="flex items-start gap-3 rounded-2xl bg-grey-50 p-5 text-[15px] text-ink-800">
+            <Info className="mt-0.5 size-5 shrink-0 text-brand-600" aria-hidden />
+            <span>
+              <strong>Paint and materials are not included.</strong> Our prices are for labour only, so you choose your own paint with no mark-up.
             </span>
-            <div>
-              <p className="font-semibold text-navy-950">Optional extra: Ceiling painting</p>
-              <p className="text-[15px] text-navy-700">
-                Add a ceiling to any room from {ceilingPrice.from} ({ceilingPrice.detail}).
-              </p>
-            </div>
-          </div>
-          <Link href="/services/ceiling-painting" className="shrink-0 text-[15px] font-medium text-gold-700 hover:text-gold-600">
-            About ceiling painting →
-          </Link>
+          </p>
+          <p className="flex items-start gap-3 rounded-2xl bg-grey-50 p-5 text-[15px] text-ink-800">
+            <Info className="mt-0.5 size-5 shrink-0 text-brand-600" aria-hidden />
+            <span>
+              <strong>Ceiling painting</strong> can be added to any room in the quote calculator – from {ceiling.from}.
+            </span>
+          </p>
         </div>
       </Container>
     </section>

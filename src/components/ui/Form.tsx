@@ -1,7 +1,7 @@
 import type { ComponentProps, ReactNode } from "react";
 
 export const inputClasses =
-  "block w-full rounded-md border border-navy-900/15 bg-white px-3.5 py-2.5 text-[15px] text-navy-950 shadow-xs placeholder:text-navy-600/60 focus:border-gold-500 focus:outline-none focus:ring-2 focus:ring-gold-400/40 aria-[invalid=true]:border-red-600 aria-[invalid=true]:ring-red-200 disabled:bg-navy-50";
+  "block w-full rounded-xl border border-ink-900/15 bg-white px-4 py-3 text-[15px] text-ink-950 shadow-xs placeholder:text-ink-600/60 focus:border-brand-600 focus:outline-none focus:ring-2 focus:ring-brand-400/40 aria-[invalid=true]:border-red-600 aria-[invalid=true]:ring-red-200 disabled:bg-ink-50";
 
 export function Field({
   label,
@@ -20,13 +20,13 @@ export function Field({
 }) {
   return (
     <div>
-      <label htmlFor={htmlFor} className="mb-1.5 block text-sm font-medium text-navy-900">
+      <label htmlFor={htmlFor} className="mb-1.5 block text-sm font-medium text-ink-900">
         {label}
         {required && <span className="text-red-700"> *</span>}
       </label>
       {children}
       {hint && !error && (
-        <p id={`${htmlFor}-hint`} className="mt-1.5 text-sm text-navy-600">
+        <p id={`${htmlFor}-hint`} className="mt-1.5 text-sm text-ink-600">
           {hint}
         </p>
       )}
@@ -53,13 +53,13 @@ export function Select({ invalid, ...props }: ComponentProps<"select"> & { inval
 
 export function Alert({ tone = "info", title, children }: { tone?: "info" | "warning" | "error" | "success"; title?: string; children: ReactNode }) {
   const tones = {
-    info: "bg-navy-50 text-navy-900 ring-navy-100",
-    warning: "bg-amber-50 text-amber-950 ring-amber-200",
+    info: "bg-ink-50 text-ink-900 ring-ink-100",
+    warning: "bg-brand-50 text-brand-900 ring-brand-200",
     error: "bg-red-50 text-red-900 ring-red-200",
-    success: "bg-emerald-50 text-emerald-900 ring-emerald-200",
+    success: "bg-brand-50 text-brand-900 ring-brand-200",
   };
   return (
-    <div role={tone === "error" ? "alert" : "status"} className={`rounded-lg p-4 text-sm ring-1 ${tones[tone]}`}>
+    <div role={tone === "error" ? "alert" : "status"} className={`rounded-2xl p-4 text-sm ring-1 ${tones[tone]}`}>
       {title && <p className="mb-1 font-semibold">{title}</p>}
       <div className="leading-relaxed">{children}</div>
     </div>
