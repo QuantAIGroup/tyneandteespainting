@@ -52,7 +52,11 @@ export function telHref(phone: string): string {
 
 export const SITE = {
   /** Set NEXT_PUBLIC_SITE_URL in your environment once you have a domain. */
-  url: (process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000").replace(/\/$/, ""),
+  url: (
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    // On Vercel, fall back to the live production address automatically
+    (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "http://localhost:3000")
+  ).replace(/\/$/, ""),
   tagline: "QUALITY SERVICE, FAIR PRICE",
   city: "Newcastle upon Tyne",
   region: "Tyne and Wear",
