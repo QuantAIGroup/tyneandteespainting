@@ -1,5 +1,5 @@
 -- =====================================================================
--- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 7, after safety review)
+-- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 8, after safety review)
 -- Run AFTER the earlier migrations.
 --
 -- ALL-OR-NOTHING: the whole migration is ONE statement (a single DO block),
@@ -119,12 +119,18 @@ declare
     'enquiries.stripe_payment_intent_id:text', 'enquiries.stripe_checkout_session_id:text', 'enquiries.stripe_customer_id:text',
     'enquiries.stripe_receipt_url:text', 'enquiries.payment_token:text',
     'enquiries.cancellation_terms_accepted_at:timestamptz', 'enquiries.early_start_requested_at:timestamptz',
-    'payments.enquiry_id:uuid'
+    'payments.enquiry_id:uuid',
+    'refunds.id:uuid', 'refunds.enquiry_id:uuid', 'refunds.stripe_refund_id:text', 'refunds.stripe_payment_intent_id:text',
+    'refunds.amount_pence:int4', 'refunds.currency:text', 'refunds.status:text', 'refunds.stripe_reason:text',
+    'refunds.source:text', 'refunds.note:text', 'refunds.created_at:timestamptz', 'refunds.updated_at:timestamptz'
   ];
   -- Columns this migration adds (may be missing before it runs)
   new_columns     constant text[] := array[
     'quote_rooms.extra_kind', 'quote_rooms.quantity', 'quote_rooms.unit_price_pence',
-    'enquiries.cancellation_terms_accepted_at', 'enquiries.early_start_requested_at'
+    'enquiries.cancellation_terms_accepted_at', 'enquiries.early_start_requested_at',
+    'refunds.id', 'refunds.enquiry_id', 'refunds.stripe_refund_id', 'refunds.stripe_payment_intent_id',
+    'refunds.amount_pence', 'refunds.currency', 'refunds.status', 'refunds.stripe_reason',
+    'refunds.source', 'refunds.note', 'refunds.created_at', 'refunds.updated_at'
   ];
   col text;
   col_type text;
@@ -313,6 +319,33 @@ begin
   alter table public.quote_rooms add column if not exists extra_kind text;
   alter table public.quote_rooms add column if not exists quantity integer;
   alter table public.quote_rooms add column if not exists unit_price_pence integer;
+
+  -- Refund record: every refund made through Stripe, kept SEPARATELY from the
+  -- original payment (which is never altered or deleted). Append-only: only a
+  -- refund's Stripe status can be updated afterwards (step 6).
+  create table if not exists public.refunds (
+    id uuid primary key default gen_random_uuid(),
+    enquiry_id uuid references public.enquiries (id) on delete set null,   -- null if not matched to a booking
+    stripe_refund_id text not null unique,
+    stripe_payment_intent_id text not null,                                 -- the original payment that was refunded
+    amount_pence integer not null check (amount_pence between 1 and 5000000),
+    currency text not null check (currency ~ '^[a-z]{3}$'),
+    status text not null check (status in ('pending', 'requires_action', 'succeeded', 'failed', 'canceled')),
+    stripe_reason text,                                                      -- Stripe's reason code, if any
+    source text not null check (source in ('admin', 'duplicate_payment', 'stripe_dashboard')),
+    note text check (note is null or length(note) <= 500),
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+  );
+  create index if not exists refunds_enquiry_idx on public.refunds (enquiry_id);
+  create index if not exists refunds_payment_idx on public.refunds (stripe_payment_intent_id);
+  alter table public.refunds enable row level security;
+  drop policy if exists "Admins can read refunds" on public.refunds;
+  create policy "Admins can read refunds" on public.refunds for select to authenticated using (public.is_admin());
+  -- Visitors nothing; admin login read-only; website server read, add and update status. Nobody deletes.
+  revoke all on public.refunds from public, anon, authenticated, service_role;
+  grant select on public.refunds to authenticated;
+  grant select, insert, update on public.refunds to service_role;
 
   foreach grp in array column_specs loop
     col := split_part(grp, ':', 1);
@@ -611,6 +644,36 @@ begin
   $fn$;
   revoke all on function public.protect_paid_quote_rooms() from public, anon, authenticated;
 
+  -- Refund record: append-only. Only a refund's Stripe status (and its
+  -- updated time) may change, plus the automatic unlinking if an unpaid
+  -- enquiry is deleted. SECURITY DEFINER so the TRUNCATE check sees every row.
+  create or replace function public.protect_refund_log()
+  returns trigger
+  language plpgsql
+  security definer
+  set search_path = ''
+  as $fn$
+  begin
+    if tg_op = 'TRUNCATE' then
+      if exists (select 1 from public.refunds) then
+        raise exception 'The refund record cannot be truncated';
+      end if;
+      return null;
+    end if;
+    if tg_op = 'DELETE' then
+      raise exception 'Refund records cannot be deleted';
+    end if;
+    if (to_jsonb(new) - 'status' - 'updated_at' - 'enquiry_id') = (to_jsonb(old) - 'status' - 'updated_at' - 'enquiry_id')
+       and (new.enquiry_id is not distinct from old.enquiry_id or new.enquiry_id is null)
+       -- a finished refund's outcome is final
+       and (new.status is not distinct from old.status or old.status in ('pending', 'requires_action')) then
+      return new;
+    end if;
+    raise exception 'Refund records cannot be changed (only a pending refund''s Stripe status can be updated)';
+  end;
+  $fn$;
+  revoke all on function public.protect_refund_log() from public, anon, authenticated;
+
   -- New tables created by postgres in this schema would otherwise give the
   -- website server TRUNCATE/TRIGGER/REFERENCES/MAINTAIN automatically
   -- (existing tables were already corrected by the api_grants migration).
@@ -643,6 +706,14 @@ begin
   create trigger quote_rooms_protect_paid before insert or update or delete on public.quote_rooms
     for each row execute function public.protect_paid_quote_rooms();
 
+  drop trigger if exists refunds_append_only on public.refunds;
+  create trigger refunds_append_only before update or delete on public.refunds
+    for each row execute function public.protect_refund_log();
+
+  drop trigger if exists refunds_prevent_truncate on public.refunds;
+  create trigger refunds_prevent_truncate before truncate on public.refunds
+    for each statement execute function public.protect_refund_log();
+
   drop trigger if exists payments_append_only on public.payments;
   create trigger payments_append_only before update or delete on public.payments
     for each row execute function public.protect_payment_log();
@@ -656,7 +727,7 @@ begin
   --    migration is rolled back.
   -- ===================================================================
   -- name:expected SECURITY DEFINER
-  foreach grp in array array['protect_payment_fields:false', 'prevent_paid_enquiry_delete:false', 'prevent_paid_enquiry_truncate:true', 'protect_payment_log:true', 'protect_paid_quote_rooms:true'] loop
+  foreach grp in array array['protect_payment_fields:false', 'prevent_paid_enquiry_delete:false', 'prevent_paid_enquiry_truncate:true', 'protect_payment_log:true', 'protect_paid_quote_rooms:true', 'protect_refund_log:true'] loop
     k := split_part(grp, ':', 1);
     select p.prosecdef, pg_get_userbyid(p.proowner), p.proconfig,
            (select count(*) from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
@@ -690,7 +761,9 @@ begin
     'enquiry_photos:enquiry_photos_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',
     'quote_rooms:quote_rooms_protect_paid:protect_paid_quote_rooms:31',              -- BEFORE INSERT OR UPDATE OR DELETE, FOR EACH ROW
     'payments:payments_append_only:protect_payment_log:27',                     -- BEFORE UPDATE OR DELETE, FOR EACH ROW
-    'payments:payments_prevent_truncate:protect_payment_log:34'
+    'payments:payments_prevent_truncate:protect_payment_log:34',
+    'refunds:refunds_append_only:protect_refund_log:27',
+    'refunds:refunds_prevent_truncate:protect_refund_log:34'
   ] loop
     select count(*) into n from pg_trigger t
     where t.tgrelid = format('public.%I', split_part(grp, ':', 1))::regclass and not t.tgisinternal
@@ -722,22 +795,54 @@ begin
     'authenticated:enquiries:SELECT,UPDATE,DELETE', 'authenticated:quote_rooms:SELECT',
     'authenticated:enquiry_photos:SELECT', 'authenticated:payments:SELECT',
     'service_role:enquiries:SELECT,INSERT,UPDATE,DELETE', 'service_role:quote_rooms:SELECT,INSERT,UPDATE,DELETE',
-    'service_role:enquiry_photos:SELECT,INSERT,UPDATE,DELETE', 'service_role:payments:SELECT,INSERT,UPDATE,DELETE'
+    'service_role:enquiry_photos:SELECT,INSERT,UPDATE,DELETE', 'service_role:payments:SELECT,INSERT,UPDATE,DELETE',
+    'anon:refunds:', 'authenticated:refunds:SELECT', 'service_role:refunds:SELECT,INSERT,UPDATE'
   ] loop
     fields := array['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'];
     if current_setting('server_version_num')::int >= 170000 then
-      fields := fields || 'MAINTAIN';
+      fields := array_append(fields, 'MAINTAIN'::text);
     end if;
     foreach f in array fields loop
       if has_table_privilege(split_part(grp, ':', 1), format('public.%I', split_part(grp, ':', 2)), f)
          is distinct from coalesce(f = any (string_to_array(nullif(split_part(grp, ':', 3), ''), ',')), false) then
         raise exception 'Verification failed: % % on % is not as intended', split_part(grp, ':', 1), f, split_part(grp, ':', 2);
       end if;
+      -- A column-level grant would give access that the table-level check above can't see
+      if f in ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
+         and has_any_column_privilege(split_part(grp, ':', 1), format('public.%I', split_part(grp, ':', 2)), f)
+             is distinct from coalesce(f = any (string_to_array(nullif(split_part(grp, ':', 3), ''), ',')), false) then
+        raise exception 'Verification failed: % has column-level % on % that is not intended', split_part(grp, ':', 1), f, split_part(grp, ':', 2);
+      end if;
     end loop;
   end loop;
+
+  -- Row-level security must be on for every booking table
+  select string_agg(c.relname, ', ') into k from pg_class c
+  where c.oid in ('public.enquiries'::regclass, 'public.quote_rooms'::regclass, 'public.enquiry_photos'::regclass,
+                  'public.payments'::regclass, 'public.refunds'::regclass)
+    and not c.relrowsecurity;
+  if k is not null then
+    raise exception 'Verification failed: row-level security is off for %', k;
+  end if;
+
+  -- Any OTHER role (custom roles, inherited memberships, pg_write_all_data, ...) that can
+  -- change booking data stops the migration. Allowed: the owner (postgres), the platform
+  -- superuser (supabase_admin), and the two roles checked above.
+  select string_agg(distinct r.rolname || ' (' || t.tbl || ' ' || p.priv || ')', ', ') into k
+  from pg_roles r
+  cross join (values ('enquiries'), ('quote_rooms'), ('enquiry_photos'), ('payments'), ('refunds')) t(tbl)
+  cross join (values ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('TRIGGER')) p(priv)
+  where r.rolname not in ('postgres', 'supabase_admin', 'service_role', 'authenticated')
+    and r.rolname !~ '^pg_'   -- built-in roles (e.g. pg_write_all_data); any role GIVEN their rights is still checked
+    and not r.rolsuper
+    and (has_table_privilege(r.oid, format('public.%I', t.tbl), p.priv)
+         or (p.priv in ('INSERT', 'UPDATE') and has_any_column_privilege(r.oid, format('public.%I', t.tbl), p.priv)));
+  if k is not null then
+    raise exception 'Verification failed: unexpected roles can change booking data: %', k;
+  end if;
   select count(*) into n
   from pg_class c, aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
-  where c.oid in ('public.enquiries'::regclass, 'public.quote_rooms'::regclass, 'public.enquiry_photos'::regclass, 'public.payments'::regclass)
+  where c.oid in ('public.enquiries'::regclass, 'public.quote_rooms'::regclass, 'public.enquiry_photos'::regclass, 'public.payments'::regclass, 'public.refunds'::regclass)
     and a.grantee = 0;
   if n > 0 then
     raise exception 'Verification failed: PUBLIC has privileges on a booking table';
@@ -746,7 +851,7 @@ begin
   -- Roles that CAN truncate (owner/superuser or any later grant) are all subject to the guards above
   select string_agg(distinct r.rolname, ', ' order by r.rolname) into k
   from pg_roles r
-  cross join (values ('public.enquiries'), ('public.quote_rooms'), ('public.enquiry_photos'), ('public.payments')) t(tbl)
+  cross join (values ('public.enquiries'), ('public.quote_rooms'), ('public.enquiry_photos'), ('public.payments'), ('public.refunds')) t(tbl)
   where has_table_privilege(r.oid, t.tbl::regclass, 'TRUNCATE');
   raise notice 'Roles able to TRUNCATE booking tables (all subject to the truncate guards): %', coalesce(k, 'none');
 end

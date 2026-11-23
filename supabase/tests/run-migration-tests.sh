@@ -8,9 +8,15 @@ P="psql -v ON_ERROR_STOP=1 -q -X"
 REAL_M=supabase/migrations/20261123170000_price_revision_full_payment.sql
 # PG16 (local) has no MAINTAIN privilege keyword; Supabase runs PG17. The local
 # copy differs from the real file in that one word only (checked below).
-M=/tmp/price_revision_pg16.sql
-sed 's/references, maintain on tables/references on tables/' "$REAL_M" > "$M"
-[ "$(diff "$REAL_M" "$M" | grep -c '^[<>]')" = 2 ] || { echo "FAIL  local PG16 copy differs from the migration by more than the MAINTAIN keyword"; exit 1; }
+PGVER=$($P -d postgres -tAc "show server_version_num")
+echo "== Testing on PostgreSQL $($P -d postgres -tAc "show server_version")"
+if [ "$PGVER" -ge 170000 ]; then
+  M="$REAL_M"   # same major version as Supabase: the migration file exactly as it will run
+else
+  M=/tmp/price_revision_pg16.sql
+  sed 's/references, maintain on tables/references on tables/' "$REAL_M" > "$M"
+  [ "$(diff "$REAL_M" "$M" | grep -c '^[<>]')" = 2 ] || { echo "FAIL  local PG16 copy differs from the migration by more than the MAINTAIN keyword"; exit 1; }
+fi
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; exit 1; }
 q() { $P -d "$1" -tAc "$2"; }
@@ -20,7 +26,8 @@ fresh() {
   $P -d "$1" -f supabase/tests/supabase_stub.sql >/dev/null
   for f in supabase/migrations/2026111*.sql supabase/migrations/20261120*.sql supabase/migrations/20261123120000_quote_rooms.sql; do $P -d "$1" -f "$f" >/dev/null 2>&1; done
   # PG16 (local) has no MAINTAIN privilege keyword; Supabase runs PG17
-  sed 's/, maintain on tables/ on tables/' supabase/migrations/20261123130000_api_grants.sql | $P -d "$1" >/dev/null
+  if [ "$PGVER" -ge 170000 ]; then $P -d "$1" -f supabase/migrations/20261123130000_api_grants.sql >/dev/null
+  else sed 's/, maintain on tables/ on tables/' supabase/migrations/20261123130000_api_grants.sql | $P -d "$1" >/dev/null; fi
 }
 
 seed_customers() {
@@ -36,10 +43,23 @@ values ('11111111-1111-4111-a111-111111111111', 0, 'bedroom', 'Bedroom 1', 'simp
        ('11111111-1111-4111-a111-111111111111', 2, 'ceiling', 'Ceiling', null, 2, 2, null, 2, '{"surface":"good"}', null, 6500),
        ('22222222-2222-4222-a222-222222222222', 0, 'living_room', 'Lounge', 'walls', null, null, null, 3, '{"surface":"good"}', 40, 22500);
 insert into public.enquiry_photos (enquiry_id, storage_path) values ('11111111-1111-4111-a111-111111111111', 'pending/x/a.jpg');
+-- A customer whose price has already been agreed, with measured walls, photos and a payment-log entry
+insert into public.enquiries (id, reference, full_name, email, phone, postcode, preferred_contact, items, breakdown, pricing_snapshot, estimated_total_pence,
+    payment_type, status, agreed_service, agreed_price_pence, deposit_pence, consultation_confirmed_at, price_agreed_at, comments)
+values ('33333333-3333-4333-a333-333333333333', 'PRE-3', 'Agreed Customer', 'g@example.invalid', '07000000002', 'NE3 3AA', 'phone',
+    '[{"type":"living_room"}]', '{"totalPence":39000}', '{"bedroom":{"ratePerSqm":5.5}}', 39000,
+    'full', 'price_agreed', 'Lounge walls and ceiling', 41000, 41000, '2026-11-20T10:00:00Z', '2026-11-20T10:05:00Z', 'Dog in the house');
+insert into public.quote_rooms (enquiry_id, position, item_type, label, measurement_mode, walls, height_m, include_ceiling, length_m, width_m, coats, condition, wall_area_sqm, ceiling_area_sqm, estimated_labour_pence, requires_manual_quote)
+values ('33333333-3333-4333-a333-333333333333', 0, 'living_room', 'Lounge', 'walls', '[{"width":4.2},{"width":3.6},{"width":4.2},{"width":3.6}]', 2.45, true, 4.2, 3.6, 2, '{"surface":"fair","stainBlock":true}', 38.22, 15.12, 39000, false),
+       ('33333333-3333-4333-a333-333333333333', 1, 'bedroom', 'Damaged bedroom', 'simple', null, 2.4, false, 3.1, 3.0, 2, '{"surface":"poor","wallpaperToRemove":true}', 29.28, null, null, true);
+insert into public.enquiry_photos (enquiry_id, storage_path) values ('33333333-3333-4333-a333-333333333333', 'enquiries/33333333/lounge-1.jpg'), ('33333333-3333-4333-a333-333333333333', 'enquiries/33333333/lounge-2.jpg');
+insert into public.payments (enquiry_id, kind, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, notes)
+values ('33333333-3333-4333-a333-333333333333', 'full', 'needs_review', 41000, 'gbp', 'cs_pre3', 'pi_pre3_early', 'evt_pre3', 'Paid before the link was re-sent – check in Stripe');
 create table public._before as
   select 'e' k, to_jsonb(e) j from public.enquiries e union all
   select 'r', to_jsonb(r) from public.quote_rooms r union all
-  select 'p', to_jsonb(p) from public.enquiry_photos p;
+  select 'p', to_jsonb(p) from public.enquiry_photos p union all
+  select 'pay', to_jsonb(x) from public.payments x;
 SQL
 }
 
@@ -64,7 +84,8 @@ $P -d mig_a >/dev/null <<'SQL'
 create view public._after_view as
   select 'e' k, to_jsonb(e) - 'cancellation_terms_accepted_at' - 'early_start_requested_at' j from public.enquiries e union all
   select 'r', to_jsonb(r) - 'extra_kind' - 'quantity' - 'unit_price_pence' from public.quote_rooms r union all
-  select 'p', to_jsonb(p) from public.enquiry_photos p;
+  select 'p', to_jsonb(p) from public.enquiry_photos p union all
+  select 'pay', to_jsonb(x) from public.payments x;
 SQL
 $P -d mig_a -f supabase/tests/price_revision_checks.sql
 
@@ -140,9 +161,13 @@ fresh mig_w; $P -d mig_w -c "alter table public.quote_rooms alter column estimat
 expect_stop mig_w "column quote_rooms.estimated_labour_pence has type numeric" "estimated_labour_pence not an integer"
 
 echo "== 9. Guards only block when there is something to protect"
-fresh mig_x; seed_customers mig_x; $P -d mig_x -f "$M" >/dev/null 2>&1
-if $P -d mig_x -c "truncate public.enquiries cascade" >/dev/null 2>&1; then pass "owner can TRUNCATE when there are no paid bookings and the payment log is empty"; else fail "truncate guard blocked an empty/unpaid table"; fi
+fresh mig_x; $P -d mig_x -f "$M" >/dev/null 2>&1
+$P -d mig_x -c "insert into public.enquiries (reference, full_name, email, phone, postcode, preferred_contact, items, breakdown, pricing_snapshot, estimated_total_pence) values ('U-1','U','u@example.invalid','0','NE1','phone','[]','{}','{}',0)" >/dev/null
+if $P -d mig_x -c "truncate public.enquiries cascade" >/dev/null 2>&1; then pass "owner can TRUNCATE unpaid enquiries when the payment and refund records are empty"; else fail "truncate guard blocked an unpaid table"; fi
 if [ "$(q mig_x "select count(*) from public.enquiries")" = 0 ]; then pass "tables emptied as requested"; else fail "truncate did not run"; fi
+fresh mig_x2; seed_customers mig_x2; $P -d mig_x2 -f "$M" >/dev/null 2>&1
+if $P -d mig_x2 -c "truncate public.enquiries cascade" >/dev/null 2>&1; then fail "truncate wiped a payment-log entry"; else pass "TRUNCATE refused while the payment log has entries (even with no paid bookings)"; fi
+if [ "$(q mig_x2 "select count(*) from public.payments")" = 1 ]; then pass "payment-log entry still there"; else fail "payment log changed"; fi
 
 echo "== 10. Existing records with unexpected statuses stop the migration (records are not changed)"
 fresh mig_y; seed_customers mig_y
@@ -156,11 +181,22 @@ $P -d mig_z -c "set request.jwt.claims = '{\"role\":\"service_role\"}'" -c "upda
 expect_stop mig_z "paid bookings have an unpaid status: PRE-2 (awaiting_consultation)" "a paid booking still marked awaiting consultation"
 
 echo "== 11. Unexpected permissions stop the migration (permissions are verified, not silently changed)"
-for g in "grant truncate on public.payments to authenticated" "grant insert on public.payments to anon" "grant trigger on public.enquiries to service_role" "grant select on public.quote_rooms to public"; do
+PERM_CASES=("grant truncate on public.payments to authenticated" "grant insert on public.payments to anon" "grant trigger on public.enquiries to service_role" "grant select on public.quote_rooms to public"
+  "grant update (notes) on public.payments to anon" "grant insert (enquiry_id) on public.quote_rooms to authenticated"
+  "create role tt_custom; grant update on public.enquiries to tt_custom" "create role tt_writer; grant pg_write_all_data to tt_writer"
+  "create role tt_member; grant service_role to tt_member; grant delete on public.payments to tt_member"
+  "alter table public.payments disable row level security")
+[ "$PGVER" -ge 170000 ] && PERM_CASES+=("grant maintain on public.enquiries to authenticated")
+for g in "${PERM_CASES[@]}"; do
+  for r in tt_custom tt_writer tt_member; do $P -d postgres -c "drop database if exists mig_p2" -c "drop role if exists $r" >/dev/null 2>&1 || true; done
   fresh mig_p2; seed_customers mig_p2; $P -d mig_p2 -c "$g" >/dev/null
   if $P -d mig_p2 -f "$M" >/dev/null 2>/tmp/mig.err; then fail "migration accepted: $g"; fi
   grep -q "Verification failed" /tmp/mig.err || { cat /tmp/mig.err; fail "wrong error for: $g"; }
   if [ "$(q mig_p2 "select count(*) from pg_constraint where conname = 'enquiries_full_payment_only'")" = 0 ]; then pass "'$g' -> stopped and rolled back ($(grep -o 'Verification failed:.*' /tmp/mig.err | cut -c22- | head -1))"; else fail "not rolled back"; fi
 done
+$P -d postgres -c "drop database if exists mig_p2" >/dev/null; for r in tt_custom tt_writer tt_member; do $P -d postgres -c "drop role if exists $r" >/dev/null; done
+fresh mig_p3; seed_customers mig_p3; $P -d mig_p3 -c "create role tt_reader; grant select on public.enquiries to tt_reader" >/dev/null 2>&1 || $P -d mig_p3 -c "grant select on public.enquiries to tt_reader" >/dev/null
+if $P -d mig_p3 -f "$M" >/dev/null 2>&1; then pass "a read-only extra role (like Supabase's read-only and ETL users) does not stop the migration"; else fail "read-only role wrongly stopped the migration"; fi
+$P -d postgres -c "drop database if exists mig_p3" -c "drop role if exists tt_reader" >/dev/null
 
 echo "== All migration checks passed"

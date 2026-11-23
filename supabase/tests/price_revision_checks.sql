@@ -285,7 +285,7 @@ do $$ begin
   if not exists (select 1 from pg_roles where rolname = 'test_truncator') then create role test_truncator; end if;
 end $$;
 grant usage on schema public to test_truncator;
-grant select, truncate on public.enquiries, public.quote_rooms, public.enquiry_photos, public.payments to test_truncator;
+grant select, truncate on public.enquiries, public.quote_rooms, public.enquiry_photos, public.payments, public.refunds to test_truncator;
 create or replace function pg_temp.as_truncator(stmt text) returns text language plpgsql as $$
 begin
   begin
@@ -305,7 +305,7 @@ select case when pg_temp.as_truncator('truncate public.enquiries cascade') like 
   else 'FAIL  granted TRUNCATE role got through' end;
 select case when (select count(*) from public.enquiries where deposit_paid_at is not null) > 0 and (select count(*) from public.payments) > 0
   then 'PASS  paid bookings and payment log still present after all TRUNCATE attempts' else 'FAIL  data lost' end;
-revoke all on public.enquiries, public.quote_rooms, public.enquiry_photos, public.payments from test_truncator;
+revoke all on public.enquiries, public.quote_rooms, public.enquiry_photos, public.payments, public.refunds from test_truncator;
 revoke usage on schema public from test_truncator;
 select case when not exists (
     select 1 from pg_default_acl d, aclexplode(d.defaclacl) a
@@ -345,3 +345,32 @@ select case when
                   where has_table_privilege(r, t, p))
   then 'PASS  API roles: visitors nothing; admin login read + enquiry status/notes; server read/write; no API role can TRUNCATE, add triggers or reference the tables'
   else 'FAIL  API role permissions' end;
+
+-- ---------------------------------------------------------------- refunds: recorded separately, never by changing the payment
+create temp table _paid_before as
+  select to_jsonb(e) - 'status' - 'updated_at' - 'admin_notes' - 'booking_confirmed_at' - 'completed_at' - 'contacted_at' j
+  from public.enquiries e where reference = 'PRE-1'
+  union all select to_jsonb(p) from public.payments p where stripe_payment_intent_id = 'pi_full';
+grant select on _paid_before to service_role, authenticated;
+select pg_temp.expect_ok('website server records a refund of the paid booking (pending at Stripe)', $q$insert into public.refunds (enquiry_id, stripe_refund_id, stripe_payment_intent_id, amount_pence, currency, status, source, note) values ('11111111-1111-4111-a111-111111111111', 're_1', 'pi_full', 37550, 'gbp', 'pending', 'admin', 'Cancelled more than 48 hours before')$q$);
+select pg_temp.expect_ok('Stripe later reports the refund succeeded (status update only)', $q$update public.refunds set status = 'succeeded', updated_at = now() where stripe_refund_id = 're_1'$q$);
+select case when not exists (
+    select j from _paid_before except
+    select to_jsonb(e) - 'status' - 'updated_at' - 'admin_notes' - 'booking_confirmed_at' - 'completed_at' - 'contacted_at' from public.enquiries e where reference = 'PRE-1'
+    except select to_jsonb(p) from public.payments p where stripe_payment_intent_id = 'pi_full')
+  and (select deposit_paid_pence from public.enquiries where reference = 'PRE-1') = 37550
+  then 'PASS  the original payment (booking payment fields and payment log entry) is unchanged by the refund'
+  else 'FAIL  original payment changed by refund' end;
+select pg_temp.expect_reject('changing a succeeded refund back to failed', $q$update public.refunds set status = 'failed' where stripe_refund_id = 're_1'$q$, '{"role":"service_role"}', 'cannot be changed');
+select pg_temp.expect_reject('changing a refund amount', $q$update public.refunds set amount_pence = 1 where stripe_refund_id = 're_1'$q$, '{"role":"service_role"}', 'cannot be changed');
+select pg_temp.expect_reject('changing which payment a refund belongs to', $q$update public.refunds set stripe_payment_intent_id = 'pi_other' where stripe_refund_id = 're_1'$q$, '{"role":"service_role"}', 'cannot be changed');
+select pg_temp.expect_reject('server deleting a refund record', $q$delete from public.refunds where stripe_refund_id = 're_1'$q$, '{"role":"service_role"}', 'permission denied');
+select pg_temp.expect_reject('database owner deleting a refund record', $q$delete from public.refunds$q$, '', 'cannot be deleted');
+select pg_temp.expect_reject('database owner TRUNCATE of the refund record', $q$truncate public.refunds$q$, '', 'cannot be truncated');
+select pg_temp.expect_reject('admin login adding a refund record directly', $q$insert into public.refunds (stripe_refund_id, stripe_payment_intent_id, amount_pence, currency, status, source) values ('re_x', 'pi_full', 100, 'gbp', 'succeeded', 'admin')$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}', 'permission denied');
+select pg_temp.expect_reject('visitor reading refunds', $q$select 1 from public.refunds$q$, '{"role":"anon"}', 'permission denied');
+select pg_temp.expect_reject('the same Stripe refund recorded twice', $q$insert into public.refunds (stripe_refund_id, stripe_payment_intent_id, amount_pence, currency, status, source) values ('re_1', 'pi_full', 37550, 'gbp', 'succeeded', 'stripe_dashboard')$q$, '{"role":"service_role"}', 'duplicate key');
+select pg_temp.expect_reject('a zero refund', $q$insert into public.refunds (stripe_refund_id, stripe_payment_intent_id, amount_pence, currency, status, source) values ('re_0', 'pi_full', 0, 'gbp', 'succeeded', 'admin')$q$);
+select pg_temp.expect_reject('an unknown refund status', $q$insert into public.refunds (stripe_refund_id, stripe_payment_intent_id, amount_pence, currency, status, source) values ('re_s', 'pi_full', 100, 'gbp', 'done', 'admin')$q$);
+select case when (select count(*) from public.refunds r where r.stripe_refund_id = 're_1') = 1
+  then 'PASS  refund kept in its own record, linked to the original payment reference' else 'FAIL  refund record' end;

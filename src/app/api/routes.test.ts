@@ -29,11 +29,15 @@ vi.mock("@/lib/settings", () => ({
   getBusinessSettings: async () => ({ name: "Tyne & Tees Painting", phone: "07444 359371", email: "", address: "", openingHours: "", logoUrl: "", verifiedClaims: [] }),
 }));
 
+vi.mock("@/lib/auth", () => ({ requireAdmin: vi.fn(async () => ({ id: "admin" })) }));
+vi.mock("next/cache", async (orig) => ({ ...(await orig<typeof import("next/cache")>()), refresh: vi.fn(), revalidatePath: vi.fn(), revalidateTag: vi.fn(), updateTag: vi.fn() }));
+
 const { POST: submitEnquiry } = await import("./enquiries/route");
 const { POST: signUpload } = await import("./uploads/sign/route");
 const { POST: stripeWebhook } = await import("./stripe/webhook/route");
 const { POST: startCheckout } = await import("./pay/[token]/checkout/route");
 const { getStripe } = await import("@/lib/payments/stripe");
+const { refundPayment } = await import("@/app/admin/payment-actions");
 
 const json = (body: unknown) => new Request("http://localhost/api", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
@@ -254,6 +258,18 @@ describe("Stripe webhook – 100% payments", () => {
     expect(db.table("payments").map((p) => p.outcome)).toEqual(["deposit_recorded", "duplicate_refunded"]);
   });
 
+  it("records the automatic duplicate refund in the refund record, without changing the original payment", async () => {
+    await send(event({}));
+    const paidBefore = { ...db.table("enquiries")[0] };
+    const logBefore = db.table("payments").map((p) => ({ ...p }));
+    refunds.mockImplementationOnce(async () => ({ id: "re_dup", amount: 37550, currency: "gbp", status: "succeeded", reason: "duplicate", payment_intent: "pi_2" }) as never);
+    await send(event({ id: "evt_2", pi: "pi_2" }));
+    expect(db.table("refunds")).toHaveLength(1);
+    expect(db.table("refunds")[0]).toMatchObject({ stripe_refund_id: "re_dup", stripe_payment_intent_id: "pi_2", amount_pence: 37550, source: "duplicate_payment", status: "succeeded" });
+    expect(db.table("enquiries")[0]).toEqual(paidBefore);
+    expect(db.table("payments").slice(0, 1)).toEqual(logBefore);
+  });
+
   it("two DIFFERENT payments at the same moment: one confirms the booking, only the other is refunded", async () => {
     await Promise.all([send(event({})), send(event({ id: "evt_2", pi: "pi_2" }))]);
     const e = db.table("enquiries")[0];
@@ -366,6 +382,101 @@ describe("Stripe webhook – 100% payments", () => {
 });
 
 // ---------------------------------------------------------------------------
+describe("Refunds – through Stripe, recorded separately, original payment untouched", () => {
+  const enquiryId = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+  const stripe = getStripe()!;
+  const createRefund = vi.fn(async (params: { amount: number; payment_intent: string }) => ({ id: "re_admin", amount: params.amount, currency: "gbp", status: "succeeded", reason: "requested_by_customer", payment_intent: params.payment_intent, metadata: { source: "admin" } }));
+  beforeAll(() => Object.assign(stripe.refunds, { create: createRefund }));
+  beforeEach(() => {
+    createRefund.mockClear();
+    db.table("enquiries").push({
+      id: enquiryId, reference: "TT-REF", status: "booking_confirmed", full_name: "Robin", email: "r@example.com", agreed_price_pence: 37550, deposit_pence: 37550,
+      payment_type: "full", deposit_paid_at: "2026-11-23T12:00:00Z", deposit_paid_pence: 37550, stripe_payment_intent_id: "pi_paid", stripe_checkout_session_id: "cs_paid",
+      cancellation_terms_accepted_at: "2026-11-23T11:59:00Z",
+    });
+    db.table("payments").push({ id: "pay1", enquiry_id: enquiryId, outcome: "deposit_recorded", amount_pence: 37550, currency: "gbp", stripe_payment_intent_id: "pi_paid", stripe_event_id: "evt_paid", kind: "full" });
+  });
+  const snapshot = () => JSON.stringify({ e: db.table("enquiries")[0], p: db.table("payments") });
+  const refundEvent = (type: string, o: Record<string, unknown> = {}) => {
+    const body = JSON.stringify({ id: `evt_${type}_${o.status ?? "x"}_${o.id ?? "re_dash"}`, object: "event", type, data: { object: { id: "re_dash", object: "refund", amount: 37550, currency: "gbp", status: "succeeded", reason: "requested_by_customer", payment_intent: "pi_paid", metadata: {}, ...o } } });
+    const signature = stripe.webhooks.generateTestHeaderString({ payload: body, secret: process.env.STRIPE_WEBHOOK_SECRET! });
+    return stripeWebhook(new Request("http://localhost/api/stripe/webhook", { method: "POST", headers: { "stripe-signature": signature }, body }));
+  };
+  const form = (f: Record<string, string>) => { const d = new FormData(); for (const [k, v] of Object.entries(f)) d.set(k, v); return d; };
+
+  it("a refund made in the Stripe dashboard is recorded, and the payment is unchanged", async () => {
+    const before = snapshot();
+    await refundEvent("refund.created");
+    expect(db.table("refunds")).toHaveLength(1);
+    expect(db.table("refunds")[0]).toMatchObject({ enquiry_id: enquiryId, stripe_refund_id: "re_dash", stripe_payment_intent_id: "pi_paid", amount_pence: 37550, source: "stripe_dashboard", status: "succeeded" });
+    expect(snapshot()).toBe(before);
+    expect(emails.some((m) => m.subject.startsWith("Refund recorded"))).toBe(true);
+  });
+
+  it("the same refund reported twice is recorded once", async () => {
+    await refundEvent("refund.created");
+    await refundEvent("refund.updated");
+    expect(db.table("refunds")).toHaveLength(1);
+  });
+
+  it("a pending refund's status is updated when Stripe reports the outcome; a failure alerts you", async () => {
+    await refundEvent("refund.created", { status: "pending" });
+    await refundEvent("refund.failed", { status: "failed" });
+    expect(db.table("refunds")).toHaveLength(1);
+    expect(db.table("refunds")[0].status).toBe("failed");
+    expect(emails.some((m) => m.subject.includes("REFUND FAILED"))).toBe(true);
+  });
+
+  it("a finished refund's outcome isn't overwritten by a later, out-of-order event", async () => {
+    await refundEvent("refund.created", { status: "succeeded" });
+    await refundEvent("refund.updated", { status: "pending" });
+    expect(db.table("refunds")[0].status).toBe("succeeded");
+  });
+
+  it("ignores refunds of payments this website never took", async () => {
+    await refundEvent("refund.created", { payment_intent: "pi_someone_else" });
+    expect(db.table("refunds")).toHaveLength(0);
+  });
+
+  it("admin refund: refunds through Stripe to the original payment, records it, cancels if asked, payment untouched", async () => {
+    const payBefore = JSON.stringify(db.table("payments"));
+    const paidFields = ["deposit_paid_at", "deposit_paid_pence", "stripe_payment_intent_id", "agreed_price_pence", "deposit_pence"].map((k) => db.table("enquiries")[0][k]);
+    const res = await refundPayment(enquiryId, null, form({ amount: "375.50", note: "Cancelled more than 48 hours before", cancelBooking: "on" }));
+    expect(res?.ok).toBe(true);
+    expect(createRefund).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: "pi_paid", amount: 37550 }), expect.objectContaining({ idempotencyKey: expect.any(String) }));
+    expect(db.table("refunds")[0]).toMatchObject({ stripe_refund_id: "re_admin", amount_pence: 37550, source: "admin", note: "Cancelled more than 48 hours before" });
+    expect(db.table("enquiries")[0].status).toBe("cancelled");
+    expect(JSON.stringify(db.table("payments"))).toBe(payBefore);
+    expect(["deposit_paid_at", "deposit_paid_pence", "stripe_payment_intent_id", "agreed_price_pence", "deposit_pence"].map((k) => db.table("enquiries")[0][k])).toEqual(paidFields);
+  });
+
+  it("admin refund: partial refund allowed; can't refund more than what's left", async () => {
+    expect((await refundPayment(enquiryId, null, form({ amount: "300", note: "Late cancellation – evidenced materials cost" })))?.ok).toBe(true);
+    const again = await refundPayment(enquiryId, null, form({ amount: "100", note: "Second refund" }));
+    expect(again?.ok).toBe(false);
+    expect(createRefund).toHaveBeenCalledTimes(1);
+  });
+
+  it("admin refund: refused for an unpaid booking, without a reason, or for a bad amount – Stripe isn't called", async () => {
+    db.table("enquiries")[0].deposit_paid_at = null;
+    expect((await refundPayment(enquiryId, null, form({ amount: "10", note: "Test reason" })))?.ok).toBe(false);
+    db.table("enquiries")[0].deposit_paid_at = "2026-11-23T12:00:00Z";
+    expect((await refundPayment(enquiryId, null, form({ amount: "10", note: "" })))?.ok).toBe(false);
+    expect((await refundPayment(enquiryId, null, form({ amount: "-5", note: "Test reason" })))?.ok).toBe(false);
+    expect((await refundPayment(enquiryId, null, form({ amount: "999", note: "Test reason" })))?.ok).toBe(false);
+    expect(createRefund).not.toHaveBeenCalled();
+  });
+
+  it("admin refund: if Stripe refuses, nothing is recorded or changed", async () => {
+    createRefund.mockImplementationOnce(async () => { throw new Error("charge_already_refunded"); });
+    const before = snapshot();
+    const res = await refundPayment(enquiryId, null, form({ amount: "375.50", note: "Cancelled", cancelBooking: "on" }));
+    expect(res?.ok).toBe(false);
+    expect(db.table("refunds")).toHaveLength(0);
+    expect(snapshot()).toBe(before);
+  });
+});
+
 describe("Stripe webhook – part-payments can never confirm a booking", () => {
   const enquiryId = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
   const stripe = getStripe()!;

@@ -7,7 +7,9 @@ import { formatPence } from "@/lib/pricing/engine";
 import type { QuoteItem } from "@/lib/pricing/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { Alert } from "@/components/ui/Form";
-import { AgreePriceForm, BalancePaidForm, PaymentLinkControls } from "./PaymentControls";
+import { AgreePriceForm, BalancePaidForm, PaymentLinkControls, RefundForm } from "./PaymentControls";
+import { canChangeStatus } from "@/lib/payments/status-transitions";
+import { refundablePence } from "@/lib/payments/refunds";
 
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "Europe/London" }) : "—");
 
@@ -39,6 +41,10 @@ export async function PaymentPanel({ enquiry, items, estimatePence }: { enquiry:
   const admin = createAdminClient();
   const { data: payments } = admin ? await admin.from("payments").select("outcome, amount_pence, stripe_payment_intent_id, notes, created_at").eq("enquiry_id", enquiry.id as string).order("created_at") : { data: [] };
   const problems = (payments ?? []).filter((p) => p.outcome !== "deposit_recorded");
+  // Refunds are kept in their own record (the original payment is never changed)
+  const { data: refundRows } = admin ? await admin.from("refunds").select("stripe_refund_id, stripe_payment_intent_id, amount_pence, status, source, note, created_at").eq("enquiry_id", enquiry.id as string).order("created_at") : { data: [] };
+  const refunds = (refundRows ?? []) as { stripe_refund_id: string; stripe_payment_intent_id: string; amount_pence: number; status: string; source: string; note: string | null; created_at: string }[];
+  const refundable = depositPaid && pi ? refundablePence(depositPaid, refunds.filter((r) => r.stripe_payment_intent_id === pi)) : 0;
 
   const rows: [string, React.ReactNode][] = [
     ["Booking status", <strong key="s">{bookingStatusLabel(status)}</strong>],
@@ -64,6 +70,11 @@ export async function PaymentPanel({ enquiry, items, estimatePence }: { enquiry:
       <a key="r" href={enquiry.stripe_receipt_url as string} target="_blank" rel="noreferrer" className="text-brand-600 underline-offset-2 hover:underline">
         View receipt
       </a>,
+    ]);
+  for (const r of refunds)
+    rows.push([
+      `Refund (${r.source === "duplicate_payment" ? "duplicate payment" : r.source === "admin" ? "from here" : "Stripe dashboard"})`,
+      `${formatPence(r.amount_pence)} – ${r.status}${r.note ? ` – ${r.note}` : ""} · ${fmtDate(r.created_at)}`,
     ]);
   if (enquiry.balance_paid_at) rows.push(["Balance received", `${fmtDate(enquiry.balance_paid_at as string)} – ${enquiry.balance_payment_note ?? ""}`]);
 
@@ -102,8 +113,11 @@ export async function PaymentPanel({ enquiry, items, estimatePence }: { enquiry:
           <>
             <Alert tone="success">
               Payment verified by Stripe{paymentType === "full" ? " – paid in full and the booking is confirmed" : ""}. The agreed price is now locked.
-              {outstanding ? " The remaining balance is never charged automatically – collect it as agreed." : ""} Refunds (see the cancellation policy) are made in your Stripe dashboard, back to the customer&rsquo;s original payment method.
+              {outstanding ? " The remaining balance is never charged automatically – collect it as agreed." : ""} Refunds go through Stripe, back to the customer&rsquo;s original payment method, and are listed above. Refunds made directly in the Stripe dashboard are recorded here automatically.
             </Alert>
+            {refundable > 0 && isStripeConfigured() && (
+              <RefundForm id={enquiry.id as string} refundableLabel={formatPence(refundable)} refundablePounds={(refundable / 100).toFixed(2)} canCancel={status !== "cancelled" && canChangeStatus("paid", status, "cancelled")} />
+            )}
             {!enquiry.balance_paid_at && outstanding !== null && outstanding > 0 && <BalancePaidForm id={enquiry.id as string} balanceLabel={formatPence(outstanding)} />}
           </>
         ) : (

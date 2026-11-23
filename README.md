@@ -137,7 +137,7 @@ Without these, enquiries are still saved and visible in /admin – nothing is lo
 2. **Developers → API keys** → copy the **Secret key** (`sk_test_…`) into `STRIPE_SECRET_KEY`.
 3. **Settings → Payment methods** → make sure **Cards**, **Apple Pay** and **Google Pay** are on.
 4. **Settings → Customer emails** → turn on **Successful payments** so Stripe emails customers a receipt.
-5. Add the webhook (step below for local testing, or for your live site: **Developers → Webhooks → Add endpoint**, URL `https://YOUR-DOMAIN/api/stripe/webhook`, events `checkout.session.completed` and `checkout.session.async_payment_succeeded`). Copy its **Signing secret** into `STRIPE_WEBHOOK_SECRET`.
+5. Add the webhook (step below for local testing, or for your live site: **Developers → Webhooks → Add endpoint**, URL `https://YOUR-DOMAIN/api/stripe/webhook`, events `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `refund.created`, `refund.updated` and `refund.failed`). Copy its **Signing secret** into `STRIPE_WEBHOOK_SECRET`.
 6. Redeploy / restart. **/admin/settings** shows whether Stripe is in TEST or LIVE mode.
 
 ### Apple Pay and Google Pay – what you need to know

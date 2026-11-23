@@ -6,7 +6,7 @@ import { fullPaymentRequest, parsePoundsToPence } from "@/lib/payments/deposit";
 import { formatPence } from "@/lib/pricing/engine";
 import { Button } from "@/components/ui/Button";
 import { Alert, Field, Input, Textarea } from "@/components/ui/Form";
-import { agreeFinalPrice, cancelPaymentRequest, recordBalancePaid, sendPaymentLink, type PaymentActionState } from "../../../payment-actions";
+import { agreeFinalPrice, cancelPaymentRequest, recordBalancePaid, refundPayment, sendPaymentLink, type PaymentActionState } from "../../../payment-actions";
 
 /** Step 1 – approve the quotation: enter the final agreed price. The customer pays 100% of it. */
 export function AgreePriceForm({
@@ -133,6 +133,35 @@ export function BalancePaidForm({ id, balanceLabel }: { id: string; balanceLabel
       {state && <Alert tone={state.ok ? "success" : "error"}>{state.message}</Alert>}
       <Button type="submit" size="sm" variant="outline" disabled={pending}>
         {pending && <Loader2 className="size-4 animate-spin" aria-hidden />} Mark balance paid
+      </Button>
+    </form>
+  );
+}
+
+/**
+ * Refund through Stripe, back to the customer's original payment method.
+ * The refund is kept in its own record; the original payment is never changed.
+ */
+export function RefundForm({ id, refundableLabel, refundablePounds, canCancel }: { id: string; refundableLabel: string; refundablePounds: string; canCancel: boolean }) {
+  const [state, action, pending] = useActionState(refundPayment.bind(null, id), null);
+  return (
+    <form action={action} className="space-y-3 rounded-lg bg-ink-900/[0.03] p-4">
+      <h3 className="font-sans text-[15px] font-semibold text-ink-950">Refund through Stripe</h3>
+      <p className="text-sm text-ink-600">Up to {refundableLabel} can be refunded. It goes back to the customer&rsquo;s original payment method. Follow the cancellation policy: only reasonable, evidenced costs may be kept.</p>
+      <Field label="Amount to refund (£)" htmlFor="refund-amount">
+        <Input id="refund-amount" name="amount" inputMode="decimal" required defaultValue={refundablePounds} />
+      </Field>
+      <Field label="Reason" htmlFor="refund-note" hint="e.g. 'Cancelled more than 48 hours before' or 'Within 14-day cooling-off period'">
+        <Input id="refund-note" name="note" required minLength={3} maxLength={500} />
+      </Field>
+      {canCancel && (
+        <label className="flex items-center gap-2 text-sm text-ink-800">
+          <input type="checkbox" name="cancelBooking" defaultChecked className="size-4" /> Also mark the booking as cancelled
+        </label>
+      )}
+      {state && <Alert tone={state.ok ? "success" : "error"}>{state.message}</Alert>}
+      <Button type="submit" size="sm" variant="outline" disabled={pending}>
+        {pending && <Loader2 className="size-4 animate-spin" aria-hidden />} Refund now
       </Button>
     </form>
   );

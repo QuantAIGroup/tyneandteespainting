@@ -10,7 +10,11 @@
  *
  * Stripe dashboard → Developers → Webhooks → endpoint URL:
  *   https://YOUR-DOMAIN/api/stripe/webhook
- * Events: checkout.session.completed, checkout.session.async_payment_succeeded
+ * Events: checkout.session.completed, checkout.session.async_payment_succeeded,
+ *         refund.created, refund.updated, refund.failed
+ * Refunds (made from the admin area, automatically for duplicates, or directly
+ * in the Stripe dashboard) are recorded in their own refund record – the
+ * original payment record is never changed.
  */
 import { NextResponse } from "next/server";
 import type Stripe from "stripe";
@@ -23,6 +27,7 @@ import { sendCustomerEmail, sendNotification } from "@/lib/notifications";
 import { formatPence } from "@/lib/pricing/engine";
 import { getBusinessSettings } from "@/lib/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { recordRefund } from "@/lib/payments/refund-record";
 import { SITE } from "@/config/site";
 
 type Db = NonNullable<ReturnType<typeof createAdminClient>>;
@@ -68,6 +73,8 @@ export async function POST(request: Request) {
       event.type === "checkout.session.async_payment_succeeded"
     ) {
       await handlePaidSession(stripe, supabase, event, event.data.object);
+    } else if (event.type === "refund.created" || event.type === "refund.updated" || event.type === "refund.failed") {
+      await handleRefund(supabase, event.data.object);
     }
   } catch (err) {
     console.error(`Webhook ${event.id} failed – Stripe will retry`, err);
@@ -200,6 +207,7 @@ async function handlePaidSession(
     // A DIFFERENT payment was recorded first → this one is a genuine duplicate
     return refundDuplicate(
       stripe,
+      supabase,
       enquiry,
       amountPence,
       paymentIntentId,
@@ -211,6 +219,7 @@ async function handlePaidSession(
   if (decision.action === "refund_duplicate" && enquiry) {
     return refundDuplicate(
       stripe,
+      supabase,
       enquiry,
       amountPence,
       paymentIntentId,
@@ -235,6 +244,44 @@ async function handlePaidSession(
       "Please check it in Stripe and refund it if needed.",
     ],
   );
+}
+
+/**
+ * A refund was created or changed in Stripe (from the admin area, automatically
+ * for a duplicate, or directly in the Stripe dashboard). Record it in the refund
+ * record. Never changes the original payment.
+ */
+async function handleRefund(supabase: Db, refund: Stripe.Refund) {
+  const paymentIntentId = typeof refund.payment_intent === "string" ? refund.payment_intent : (refund.payment_intent?.id ?? null);
+  if (!paymentIntentId) return; // not a card/PaymentIntent refund we took
+  // Which booking? The paid booking with this payment, else the payment log entry (e.g. a duplicate)
+  const { data: booking, error: e1 } = await supabase.from("enquiries").select("id, reference").eq("stripe_payment_intent_id", paymentIntentId).maybeSingle();
+  if (e1) throw new Error(e1.message);
+  let enquiryId = (booking?.id as string | undefined) ?? null;
+  if (!enquiryId) {
+    const { data: logged, error: e2 } = await supabase.from("payments").select("enquiry_id").eq("stripe_payment_intent_id", paymentIntentId).maybeSingle();
+    if (e2) throw new Error(e2.message);
+    enquiryId = (logged?.enquiry_id as string | null | undefined) ?? null;
+  }
+  if (!enquiryId) {
+    const { data: logged } = await supabase.from("payments").select("id").eq("stripe_payment_intent_id", paymentIntentId).maybeSingle();
+    if (!logged) return; // a payment this website never took – not ours to record
+  }
+  const source = refund.metadata?.source === "admin" ? "admin" : refund.reason === "duplicate" ? "duplicate_payment" : "stripe_dashboard";
+  const added = await recordRefund(supabase, refund, { enquiryId, source });
+  const ref = (booking?.reference as string | undefined) ?? enquiryId ?? paymentIntentId;
+  if (refund.status === "failed" || refund.status === "canceled") {
+    await sendNotification(`⚠ REFUND ${refund.status === "failed" ? "FAILED" : "CANCELLED"} – ${ref}`, [
+      `A refund of ${formatPence(refund.amount)} did not go through (Stripe ${refund.id}).`,
+      `Please check it in your Stripe dashboard.`,
+      enquiryId ? `Enquiry: ${SITE.url}/admin/enquiries/${enquiryId}` : `Stripe payment: ${paymentIntentId}`,
+    ]);
+  } else if (added && source === "stripe_dashboard") {
+    await sendNotification(`Refund recorded – ${ref}`, [
+      `A refund of ${formatPence(refund.amount)} made in the Stripe dashboard has been recorded (Stripe ${refund.id}, ${refund.status}).`,
+      enquiryId ? `Enquiry: ${SITE.url}/admin/enquiries/${enquiryId}` : `Stripe payment: ${paymentIntentId}`,
+    ]);
+  }
 }
 
 /**
@@ -269,6 +316,7 @@ async function receiptUrl(stripe: Stripe, paymentIntentId: string): Promise<stri
 
 async function refundDuplicate(
   stripe: Stripe,
+  supabase: Db,
   enquiry: Record<string, unknown>,
   amountPence: number,
   paymentIntentId: string,
@@ -279,14 +327,23 @@ async function refundDuplicate(
   reason: string,
 ) {
   let refunded = false;
+  let refund: Stripe.Refund | null = null;
   try {
-    await stripe.refunds.create(
+    refund = await stripe.refunds.create(
       { payment_intent: paymentIntentId, reason: "duplicate" },
       { idempotencyKey: `refund-duplicate-${paymentIntentId}` },
     );
     refunded = true;
   } catch (err) {
     console.error("Automatic refund of duplicate payment failed", err);
+  }
+  if (refund) {
+    // Kept in the refund record, separately from the payment
+    await recordRefund(
+      supabase,
+      { id: refund.id, amount: refund.amount ?? amountPence, currency: refund.currency ?? "gbp", status: refund.status ?? "pending", reason: refund.reason ?? "duplicate", payment_intent: paymentIntentId },
+      { enquiryId: (enquiry.id as string) ?? null, source: "duplicate_payment", note: reason },
+    );
   }
   await logPayment(
     refunded ? "duplicate_refunded" : "duplicate_refund_failed",

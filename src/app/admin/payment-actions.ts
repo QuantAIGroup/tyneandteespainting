@@ -19,6 +19,9 @@ import { CANCELLATION_SUMMARY } from "@/config/cancellation";
 import { SITE } from "@/config/site";
 import { expireCheckoutSession, paymentLinkUrl } from "@/lib/payments/checkout";
 import { generatePaymentToken, getStripe } from "@/lib/payments/stripe";
+import { checkRefundRequest } from "@/lib/payments/refunds";
+import { recordRefund } from "@/lib/payments/refund-record";
+import { canChangeStatus } from "@/lib/payments/status-transitions";
 import { formatPence } from "@/lib/pricing/engine";
 import { getBusinessSettings } from "@/lib/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -35,7 +38,7 @@ async function serverDb() {
 async function loadEnquiry(supabase: NonNullable<ReturnType<typeof createAdminClient>>, id: string) {
   const { data, error } = await supabase
     .from("enquiries")
-    .select("id, reference, status, full_name, email, agreed_service, agreed_price_pence, deposit_pence, payment_type, deposit_percent, payment_token, deposit_requested_at, payment_link_send_count, stripe_checkout_session_id, deposit_paid_at, deposit_paid_pence")
+    .select("id, reference, status, full_name, email, agreed_service, agreed_price_pence, deposit_pence, payment_type, deposit_percent, payment_token, deposit_requested_at, payment_link_send_count, stripe_checkout_session_id, stripe_payment_intent_id, deposit_paid_at, deposit_paid_pence")
     .eq("id", id)
     .maybeSingle();
   if (error) throw new Error(error.message);
@@ -173,6 +176,7 @@ export async function cancelPaymentRequest(id: string): Promise<PaymentActionSta
   const enquiry = await loadEnquiry(supabase, id);
   if (!enquiry) return { ok: false, message: "Enquiry not found" };
   if (enquiry.deposit_paid_at) return { ok: false, message: "Payment has already been received." };
+  if (enquiry.status !== "deposit_requested") return { ok: false, message: "There is no open payment request to withdraw." };
   await expireCheckoutSession(getStripe(), enquiry.stripe_checkout_session_id as string | null);
   const { error } = await supabase
     .from("enquiries")
@@ -209,4 +213,61 @@ export async function recordBalancePaid(id: string, _prev: PaymentActionState, f
   if (error) return { ok: false, message: error.message };
   refresh();
   return { ok: true, message: `Balance of ${formatPence(balance)} recorded as paid.` };
+}
+
+/**
+ * Refund (all or part of) a paid booking – always through Stripe, back to the
+ * customer's original payment method. The refund is kept in its own record;
+ * the original payment is never changed or deleted. Optionally cancels the
+ * booking at the same time.
+ */
+export async function refundPayment(id: string, _prev: PaymentActionState, formData: FormData): Promise<PaymentActionState> {
+  if (!isUuid(id)) return { ok: false, message: "Invalid request" };
+  const supabase = await serverDb();
+  const stripe = getStripe();
+  if (!stripe) return { ok: false, message: "Stripe isn't connected, so refunds can't be made from here." };
+  const enquiry = await loadEnquiry(supabase, id);
+  if (!enquiry) return { ok: false, message: "Enquiry not found" };
+  const pi = (enquiry.stripe_payment_intent_id as string | null) ?? null;
+  const { data: refunds, error: refundsError } = pi
+    ? await supabase.from("refunds").select("amount_pence, status").eq("stripe_payment_intent_id", pi)
+    : { data: [], error: null };
+  if (refundsError) return { ok: false, message: refundsError.message };
+  const note = String(formData.get("note") ?? "");
+  const check = checkRefundRequest({
+    paid: Boolean(enquiry.deposit_paid_at) && Boolean(pi),
+    paidPence: (enquiry.deposit_paid_pence as number | null) ?? null,
+    refunds: (refunds ?? []) as { amount_pence: number; status: string }[],
+    amountPence: parsePoundsToPence(String(formData.get("amount") ?? "")),
+    note,
+  });
+  if (!check.ok) return { ok: false, message: check.message };
+
+  const alreadyRefunded = ((refunds ?? []) as { amount_pence: number }[]).reduce((s, r) => s + r.amount_pence, 0);
+  let refund;
+  try {
+    refund = await stripe.refunds.create(
+      { payment_intent: pi!, amount: check.amountPence, reason: "requested_by_customer", metadata: { enquiry_id: id, source: "admin" } },
+      // A double click sends the same request, so Stripe makes ONE refund
+      { idempotencyKey: `refund-${pi}-${alreadyRefunded}-${check.amountPence}` },
+    );
+  } catch (err) {
+    return { ok: false, message: `Stripe did not make the refund: ${err instanceof Error ? err.message : "unknown error"}. Nothing was changed.` };
+  }
+  try {
+    await recordRefund(supabase, refund, { enquiryId: id, source: "admin", note: note.trim() });
+  } catch (err) {
+    console.error("Refund made in Stripe but not recorded yet (the Stripe webhook will record it)", err);
+  }
+
+  let cancelled = "";
+  if (formData.get("cancelBooking") === "on" && enquiry.status !== "cancelled") {
+    if (canChangeStatus("paid", enquiry.status as string, "cancelled")) {
+      const { error } = await supabase.from("enquiries").update({ status: "cancelled" }).eq("id", id);
+      cancelled = error ? ` The booking could not be marked cancelled (${error.message}).` : " The booking is now cancelled.";
+    }
+  }
+  refresh();
+  const state = refund.status === "succeeded" ? "Refunded" : `Refund ${refund.status ?? "pending"}`;
+  return { ok: true, message: `${state}: ${formatPence(check.amountPence)} back to the customer's original payment method (Stripe ${refund.id}).${cancelled}` };
 }
