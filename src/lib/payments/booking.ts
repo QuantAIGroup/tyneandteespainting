@@ -2,6 +2,7 @@
  * Booking status rules and the decision made when Stripe reports a payment.
  * Pure functions – unit tested in booking.test.ts.
  */
+import { STATUS_TRANSITIONS, canChangeStatus } from "./status-transitions";
 
 export const BOOKING_STATUSES = [
   { id: "awaiting_consultation", label: "Awaiting phone consultation" },
@@ -34,29 +35,26 @@ export function statusAfterVerifiedPayment(paymentType: string | null | undefine
 export const PAID_STATUSES: BookingStatus[] = ["deposit_paid", "booking_confirmed", "work_completed", "balance_paid"];
 
 /**
- * Which statuses the admin may choose from the status menu.
- * "Price agreed" and "Deposit requested" are set by their own buttons (so a
- * price and payment link always exist), and "Deposit paid" is ONLY ever set by
- * the verified Stripe webhook.
+ * Which statuses the admin may choose from the status menu – always a subset
+ * of the allowed moves in status-transitions.ts (which the database enforces).
+ * "Price agreed" and "Payment requested" are set by their own buttons (so a
+ * price and payment link always exist), and a booking only becomes confirmed
+ * through the verified Stripe webhook.
+ * balanceDue is accepted for older callers but no longer used: balance
+ * payments belonged to the old deposit system.
  */
+const BUTTON_ONLY: string[] = ["price_agreed", "deposit_requested"];
+
 export function manualStatusOptions(b: { status: string; depositPaid: boolean; balanceDue?: boolean }): BookingStatus[] {
-  const options = new Set<BookingStatus>([b.status as BookingStatus]);
-  if (b.depositPaid) {
-    options.add("booking_confirmed");
-    options.add("work_completed");
-    // "Balance paid" only makes sense if something is still owed (older deposit bookings)
-    if (b.balanceDue !== false) options.add("balance_paid");
-    options.add("cancelled");
-  } else {
-    options.add("awaiting_consultation");
-    options.add("declined");
-    options.add("cancelled");
-  }
+  const kind = b.depositPaid ? "paid" : "unpaid";
+  const targets = (STATUS_TRANSITIONS[kind][b.status] ?? []).filter((s) => !BUTTON_ONLY.includes(s));
+  const options = new Set<string>([b.status, ...targets]);
   return BOOKING_STATUSES.map((s) => s.id).filter((id) => options.has(id));
 }
 
 export function canSetStatusManually(target: string, b: { status: string; depositPaid: boolean; balanceDue?: boolean }): boolean {
   if (target === b.status) return true;
+  if (!canChangeStatus(b.depositPaid ? "paid" : "unpaid", b.status, target)) return false;
   return manualStatusOptions(b).includes(target as BookingStatus);
 }
 

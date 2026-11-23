@@ -1,5 +1,5 @@
 -- =====================================================================
--- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 5, after safety review)
+-- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 6, after safety review)
 -- Run AFTER the earlier migrations.
 --
 -- ALL-OR-NOTHING: the whole migration is ONE statement (a single DO block),
@@ -118,7 +118,8 @@ declare
     'enquiries.deposit_percent:int4', 'enquiries.deposit_paid_pence:int4', 'enquiries.deposit_paid_at:timestamptz',
     'enquiries.stripe_payment_intent_id:text', 'enquiries.stripe_checkout_session_id:text', 'enquiries.stripe_customer_id:text',
     'enquiries.stripe_receipt_url:text', 'enquiries.payment_token:text',
-    'enquiries.cancellation_terms_accepted_at:timestamptz', 'enquiries.early_start_requested_at:timestamptz'
+    'enquiries.cancellation_terms_accepted_at:timestamptz', 'enquiries.early_start_requested_at:timestamptz',
+    'payments.enquiry_id:uuid'
   ];
   -- Columns this migration adds (may be missing before it runs)
   new_columns     constant text[] := array[
@@ -337,17 +338,23 @@ begin
   execute format('alter table public.quote_rooms add constraint quote_rooms_extra_shape_check check (%s)', room_shape_rule);
 
   -- ===================================================================
-  -- 5. PAYMENT PROTECTION
-  --    Same security properties as the existing function: SECURITY INVOKER,
-  --    search_path = '', owner postgres, executable only by its owner.
-  --    CREATE OR REPLACE keeps the existing owner, permissions and trigger.
+  -- 5. PAYMENT AND STATUS PROTECTION  (trigger: BEFORE INSERT OR UPDATE)
+  --    SECURITY INVOKER, search_path = '', owner postgres, executable
+  --    only by its owner (checked in step 8).
+  --
+  --    New enquiries: must start as "Awaiting phone consultation" with no
+  --    price, payment or Stripe details – a booking can't be created
+  --    already agreed, requested or paid.
+  --
+  --    Status: must be one of the nine known statuses, and every change must
+  --    be on the explicit allowlist below (kept in step with
+  --    src/lib/payments/status-transitions.ts – a test fails if they differ).
+  --    A payment can only be recorded on a "Payment requested" booking and
+  --    must move it to "Booking confirmed" in the same update.
   --
   --    Before payment: only the website server (service role) may write the
-  --    payment fields – unchanged.
-  --    After payment: the payment record is locked for EVERYONE, including
-  --    the website server, and the booking can't go back to an unpaid status.
-  --    Status can still move forward (confirmed, work completed, cancelled)
-  --    and the Stripe receipt/customer link can be filled in once if empty.
+  --    payment fields. After payment: the payment record is locked for
+  --    EVERYONE, including the website server.
   -- ===================================================================
   create or replace function public.protect_payment_fields()
   returns trigger
@@ -355,7 +362,57 @@ begin
   security invoker
   set search_path = ''
   as $fn$
+  declare
+    known_statuses constant text[] := array[
+      'awaiting_consultation', 'price_agreed', 'deposit_requested', 'deposit_paid',
+      'booking_confirmed', 'work_completed', 'balance_paid', 'declined', 'cancelled'];
+    -- ALLOWED STATUS CHANGES  (kind:from>to)
+    allowed_transitions constant text[] := array[
+      'unpaid:awaiting_consultation>price_agreed',
+      'unpaid:awaiting_consultation>declined',
+      'unpaid:awaiting_consultation>cancelled',
+      'unpaid:price_agreed>awaiting_consultation',
+      'unpaid:price_agreed>deposit_requested',
+      'unpaid:price_agreed>declined',
+      'unpaid:price_agreed>cancelled',
+      'unpaid:deposit_requested>awaiting_consultation',
+      'unpaid:deposit_requested>price_agreed',
+      'unpaid:deposit_requested>declined',
+      'unpaid:deposit_requested>cancelled',
+      'unpaid:declined>awaiting_consultation',
+      'unpaid:declined>cancelled',
+      'unpaid:cancelled>awaiting_consultation',
+      'unpaid:cancelled>declined',
+      'payment:deposit_requested>booking_confirmed',
+      'paid:deposit_paid>booking_confirmed',
+      'paid:deposit_paid>work_completed',
+      'paid:deposit_paid>cancelled',
+      'paid:booking_confirmed>work_completed',
+      'paid:booking_confirmed>cancelled',
+      'paid:work_completed>booking_confirmed',
+      'paid:work_completed>cancelled'
+    ];
+    change_kind text;
   begin
+    if new.status is null or not (new.status = any (known_statuses)) then
+      raise exception 'Unknown booking status: %', coalesce(new.status, 'NULL');
+    end if;
+
+    -- ---------- New enquiries
+    if tg_op = 'INSERT' then
+      if new.status is distinct from 'awaiting_consultation'
+         or new.agreed_price_pence is not null or new.deposit_pence is not null
+         or new.deposit_paid_at is not null or new.deposit_paid_pence is not null
+         or new.stripe_payment_intent_id is not null or new.stripe_checkout_session_id is not null
+         or new.stripe_customer_id is not null or new.stripe_receipt_url is not null
+         or new.payment_token is not null
+         or new.cancellation_terms_accepted_at is not null or new.early_start_requested_at is not null then
+        raise exception 'A new enquiry must start as awaiting consultation, with no price or payment details';
+      end if;
+      return new;
+    end if;
+
+    -- ---------- Payment fields: only the website server, before payment
     if coalesce(auth.role(), '') <> 'service_role' then
       if new.deposit_paid_pence is distinct from old.deposit_paid_pence
          or new.deposit_paid_at is distinct from old.deposit_paid_at
@@ -374,7 +431,7 @@ begin
       end if;
     end if;
 
-    -- Once a payment has been received, the payment record is locked for everyone
+    -- ---------- Once a payment has been received, the payment record is locked for everyone
     if old.deposit_paid_at is not null then
       if new.agreed_price_pence is distinct from old.agreed_price_pence
          or new.deposit_pence is distinct from old.deposit_pence
@@ -391,8 +448,22 @@ begin
          or (old.stripe_receipt_url is not null and new.stripe_receipt_url is distinct from old.stripe_receipt_url) then
         raise exception 'The agreed price and payment cannot change after payment is received';
       end if;
-      if new.status in ('awaiting_consultation', 'price_agreed', 'deposit_requested') then
-        raise exception 'A paid booking cannot go back to an unpaid status';
+    end if;
+
+    -- ---------- Status changes: explicit allowlist
+    change_kind := case
+      when old.deposit_paid_at is not null then 'paid'
+      when new.deposit_paid_at is not null then 'payment'
+      else 'unpaid'
+    end;
+    if change_kind = 'payment' or new.status is distinct from old.status then
+      if not ((change_kind || ':' || old.status || '>' || new.status) = any (allowed_transitions)) then
+        raise exception 'Booking status cannot change from % to % (%)', old.status, new.status,
+          case change_kind
+            when 'paid' then 'payment already received'
+            when 'payment' then 'a payment can only confirm a booking that is awaiting payment'
+            else 'not paid'
+          end;
       end if;
     end if;
     return new;
@@ -401,11 +472,18 @@ begin
   revoke all on function public.protect_payment_fields() from public, anon, authenticated;
 
   -- ===================================================================
-  -- 6. PAID BOOKINGS CAN'T BE REMOVED
-  --    Row deletes (admin login, website server) and TRUNCATE (only the
-  --    database owner/superuser has that privilege – e.g. the Supabase SQL
-  --    editor) are refused while any paid booking exists. This cannot stop a
-  --    database owner who deliberately disables triggers.
+  -- 6. PAID BOOKINGS AND THE PAYMENT LOG CAN'T BE REMOVED
+  --    Row deletes are refused for paid bookings. TRUNCATE is refused on
+  --    enquiries, quote_rooms and enquiry_photos while any paid booking
+  --    exists, and on the payments log while it has any entries.
+  --    Triggers apply to every role that holds TRUNCATE or DELETE, however
+  --    it got it (the owner, the superuser, or any role granted it now or
+  --    later). They cannot stop a role that owns the table or is a superuser
+  --    from deliberately disabling or dropping the triggers.
+  --
+  --    The payments log becomes append-only: rows can't be edited or
+  --    deleted. The only update allowed is the database's own "set the
+  --    enquiry link to empty" when an unpaid enquiry is deleted.
   -- ===================================================================
   create or replace function public.prevent_paid_enquiry_delete()
   returns trigger
@@ -422,26 +500,62 @@ begin
   $fn$;
   revoke all on function public.prevent_paid_enquiry_delete() from public, anon, authenticated;
 
+  -- SECURITY DEFINER (runs as the owner, postgres, which bypasses row-level
+  -- security) so the check sees EVERY row: a role granted TRUNCATE that is
+  -- subject to row-level security would otherwise see no paid bookings and
+  -- get through. It reads one table, takes no input and has search_path ''.
   create or replace function public.prevent_paid_enquiry_truncate()
   returns trigger
   language plpgsql
-  security invoker
+  security definer
   set search_path = ''
   as $fn$
   begin
     if exists (select 1 from public.enquiries where deposit_paid_at is not null) then
-      raise exception 'The enquiries table contains paid bookings and cannot be truncated';
+      raise exception 'Table % holds data for paid bookings and cannot be truncated', tg_table_name;
     end if;
     return null;
   end;
   $fn$;
   revoke all on function public.prevent_paid_enquiry_truncate() from public, anon, authenticated;
 
+  -- SECURITY DEFINER for the same reason (the TRUNCATE check must see every entry).
+  create or replace function public.protect_payment_log()
+  returns trigger
+  language plpgsql
+  security definer
+  set search_path = ''
+  as $fn$
+  begin
+    if tg_op = 'TRUNCATE' then
+      if exists (select 1 from public.payments) then
+        raise exception 'The payment log cannot be truncated';
+      end if;
+      return null;
+    end if;
+    if tg_op = 'DELETE' then
+      raise exception 'Payment log entries cannot be deleted';
+    end if;
+    -- UPDATE: only the automatic unlinking when an (unpaid) enquiry is deleted
+    if new.enquiry_id is null and old.enquiry_id is not null
+       and (to_jsonb(new) - 'enquiry_id') = (to_jsonb(old) - 'enquiry_id') then
+      return new;
+    end if;
+    raise exception 'Payment log entries cannot be changed';
+  end;
+  $fn$;
+  revoke all on function public.protect_payment_log() from public, anon, authenticated;
+
+  -- New tables created by postgres in this schema would otherwise give the
+  -- website server TRUNCATE/TRIGGER/REFERENCES/MAINTAIN automatically
+  -- (existing tables were already corrected by the api_grants migration).
+  execute 'alter default privileges for role postgres in schema public revoke truncate, trigger, references, maintain on tables from service_role';
+
   -- ===================================================================
   -- 7. ATTACH THE TRIGGERS EXPLICITLY (not relying on existing set-up)
   -- ===================================================================
   drop trigger if exists enquiries_protect_payment on public.enquiries;
-  create trigger enquiries_protect_payment before update on public.enquiries
+  create trigger enquiries_protect_payment before insert or update on public.enquiries
     for each row execute function public.protect_payment_fields();
 
   drop trigger if exists enquiries_prevent_paid_delete on public.enquiries;
@@ -452,23 +566,36 @@ begin
   create trigger enquiries_prevent_paid_truncate before truncate on public.enquiries
     for each statement execute function public.prevent_paid_enquiry_truncate();
 
+  drop trigger if exists quote_rooms_prevent_paid_truncate on public.quote_rooms;
+  create trigger quote_rooms_prevent_paid_truncate before truncate on public.quote_rooms
+    for each statement execute function public.prevent_paid_enquiry_truncate();
+
+  drop trigger if exists enquiry_photos_prevent_paid_truncate on public.enquiry_photos;
+  create trigger enquiry_photos_prevent_paid_truncate before truncate on public.enquiry_photos
+    for each statement execute function public.prevent_paid_enquiry_truncate();
+
+  drop trigger if exists payments_append_only on public.payments;
+  create trigger payments_append_only before update or delete on public.payments
+    for each row execute function public.protect_payment_log();
+
+  drop trigger if exists payments_prevent_truncate on public.payments;
+  create trigger payments_prevent_truncate before truncate on public.payments
+    for each statement execute function public.protect_payment_log();
+
   -- ===================================================================
   -- 8. FINAL VERIFICATION – if anything below is wrong, the whole
   --    migration is rolled back.
   -- ===================================================================
-  foreach grp in array array[
-    'protect_payment_fields:enquiries_protect_payment:19',        -- BEFORE UPDATE, FOR EACH ROW
-    'prevent_paid_enquiry_delete:enquiries_prevent_paid_delete:11', -- BEFORE DELETE, FOR EACH ROW
-    'prevent_paid_enquiry_truncate:enquiries_prevent_paid_truncate:34' -- BEFORE TRUNCATE, FOR EACH STATEMENT
-  ] loop
+  -- name:expected SECURITY DEFINER
+  foreach grp in array array['protect_payment_fields:false', 'prevent_paid_enquiry_delete:false', 'prevent_paid_enquiry_truncate:true', 'protect_payment_log:true'] loop
     k := split_part(grp, ':', 1);
     select p.prosecdef, pg_get_userbyid(p.proowner), p.proconfig,
            (select count(*) from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
             where a.privilege_type = 'EXECUTE' and (a.grantee = 0 or a.grantee in ('anon'::regrole, 'authenticated'::regrole)))
       into fn_secdef, fn_owner, fn_config, fn_public_exec
     from pg_proc p where p.oid = format('public.%I()', k)::regprocedure;
-    if fn_secdef is distinct from false then
-      raise exception 'Verification failed: % is not SECURITY INVOKER', k;
+    if fn_secdef is distinct from split_part(grp, ':', 2)::boolean then
+      raise exception 'Verification failed: % SECURITY DEFINER is % (expected %)', k, fn_secdef, split_part(grp, ':', 2);
     end if;
     if fn_owner is distinct from 'postgres' then
       raise exception 'Verification failed: % is owned by % (expected postgres)', k, fn_owner;
@@ -479,12 +606,27 @@ begin
     if fn_public_exec > 0 then
       raise exception 'Verification failed: % can be executed by PUBLIC, anon or authenticated', k;
     end if;
+  end loop;
+  -- The definer functions only see every row if their owner bypasses row-level security
+  if not exists (select 1 from pg_roles where rolname = 'postgres' and (rolsuper or rolbypassrls)) then
+    raise exception 'Verification failed: postgres does not bypass row-level security, so the truncate guards could miss paid bookings';
+  end if;
 
+  -- table:trigger:function:tgtype   (tgtype bits: 1 row, 2 before, 4 insert, 8 delete, 16 update, 32 truncate)
+  foreach grp in array array[
+    'enquiries:enquiries_protect_payment:protect_payment_fields:23',            -- BEFORE INSERT OR UPDATE, FOR EACH ROW
+    'enquiries:enquiries_prevent_paid_delete:prevent_paid_enquiry_delete:11',   -- BEFORE DELETE, FOR EACH ROW
+    'enquiries:enquiries_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',        -- BEFORE TRUNCATE, FOR EACH STATEMENT
+    'quote_rooms:quote_rooms_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',
+    'enquiry_photos:enquiry_photos_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',
+    'payments:payments_append_only:protect_payment_log:27',                     -- BEFORE UPDATE OR DELETE, FOR EACH ROW
+    'payments:payments_prevent_truncate:protect_payment_log:34'
+  ] loop
     select count(*) into n from pg_trigger t
-    where t.tgrelid = 'public.enquiries'::regclass and not t.tgisinternal
+    where t.tgrelid = format('public.%I', split_part(grp, ':', 1))::regclass and not t.tgisinternal
       and t.tgname = split_part(grp, ':', 2)
-      and t.tgfoid = format('public.%I()', k)::regprocedure
-      and t.tgtype = split_part(grp, ':', 3)::int2
+      and t.tgfoid = format('public.%I()', split_part(grp, ':', 3))::regprocedure
+      and t.tgtype = split_part(grp, ':', 4)::int2
       and t.tgenabled = 'O';
     if n is distinct from 1 then
       raise exception 'Verification failed: trigger % is not attached as expected', split_part(grp, ':', 2);
@@ -496,6 +638,18 @@ begin
   where t.tgfoid = 'public.protect_payment_fields()'::regprocedure and not t.tgisinternal;
   if n is distinct from 1 then
     raise exception 'Verification failed: protect_payment_fields is attached % times (expected 1)', n;
+  end if;
+
+  -- Every role that can TRUNCATE or DELETE from these tables is covered by the
+  -- triggers above (triggers apply to all roles). Report who they are.
+  select string_agg(distinct r.rolname, ', ' order by r.rolname) into k
+  from pg_roles r
+  cross join (values ('public.enquiries'), ('public.quote_rooms'), ('public.enquiry_photos'), ('public.payments')) t(tbl)
+  where has_table_privilege(r.oid, t.tbl::regclass, 'TRUNCATE');
+  raise notice 'Roles able to TRUNCATE booking tables (all subject to the truncate guards): %', coalesce(k, 'none');
+  if has_table_privilege('anon', 'public.enquiries', 'TRUNCATE') or has_table_privilege('authenticated', 'public.enquiries', 'TRUNCATE')
+     or has_table_privilege('service_role', 'public.enquiries', 'TRUNCATE') or has_table_privilege('service_role', 'public.payments', 'TRUNCATE') then
+    raise exception 'Verification failed: an API role can TRUNCATE booking tables';
   end if;
 end
 $migration$;

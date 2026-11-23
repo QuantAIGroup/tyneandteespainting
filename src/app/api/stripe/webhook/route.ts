@@ -177,7 +177,16 @@ async function handlePaidSession(
       await sendPaidEmails(enquiry, amountPence, paymentIntentId);
       return;
     }
-    // Lost a race with another payment → this one is a duplicate
+    // Lost a race. If the winner recorded THIS payment (the same event delivered
+    // twice at once), there is nothing to do – never refund the customer's real payment.
+    const { data: current, error: rereadError } = await supabase
+      .from("enquiries")
+      .select("stripe_payment_intent_id")
+      .eq("id", enquiry.id)
+      .maybeSingle();
+    if (rereadError) throw new Error(rereadError.message); // Stripe retries; nothing refunded
+    if (!current || current.stripe_payment_intent_id === paymentIntentId) return;
+    // A DIFFERENT payment was recorded first → this one is a genuine duplicate
     return refundDuplicate(
       stripe,
       enquiry,

@@ -233,6 +233,8 @@ describe("Stripe webhook – 100% payments", () => {
     expect(db.table("enquiries")[0]).toMatchObject({ status: "booking_confirmed", deposit_paid_pence: 37550 });
     expect(db.table("payments")).toHaveLength(1);
     expect(emails.filter((m) => m.to === "sam@example.com")).toHaveLength(1);
+    // The customer's one real payment must never be refunded as a "duplicate"
+    expect(refunds).not.toHaveBeenCalled();
   });
 
   it("automatically refunds a second, duplicate payment", async () => {
@@ -241,6 +243,69 @@ describe("Stripe webhook – 100% payments", () => {
     expect(refunds).toHaveBeenCalledWith({ payment_intent: "pi_2", reason: "duplicate" }, expect.anything());
     expect(db.table("enquiries")[0]).toMatchObject({ status: "booking_confirmed", stripe_payment_intent_id: "pi_1" });
     expect(db.table("payments").map((p) => p.outcome)).toEqual(["deposit_recorded", "duplicate_refunded"]);
+  });
+
+  it("two DIFFERENT payments at the same moment: one confirms the booking, only the other is refunded", async () => {
+    await Promise.all([send(event({})), send(event({ id: "evt_2", pi: "pi_2" }))]);
+    const e = db.table("enquiries")[0];
+    expect(e.status).toBe("booking_confirmed");
+    expect(refunds).toHaveBeenCalledTimes(1);
+    const refundedPi = (refunds.mock.calls[0] as unknown as [{ payment_intent: string }])[0].payment_intent;
+    expect(refundedPi).not.toBe(e.stripe_payment_intent_id);
+  });
+
+  it("'completed' and 'async payment succeeded' for the same payment: confirmed once, never refunded", async () => {
+    await send(event({}));
+    const async = event({ id: "evt_async" });
+    async.type = "checkout.session.async_payment_succeeded";
+    await send(async);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "booking_confirmed", stripe_payment_intent_id: "pi_1" });
+    expect(refunds).not.toHaveBeenCalled();
+    expect(db.table("payments")).toHaveLength(1);
+  });
+
+  it("a failed bank payment does not confirm the booking", async () => {
+    const failed = event({ status: "unpaid" });
+    failed.type = "checkout.session.async_payment_failed";
+    await send(failed);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "deposit_requested", deposit_paid_at: null });
+    expect(db.table("payments")).toHaveLength(0);
+  });
+
+  it("a checkout needing no payment (e.g. 100% discount) does not confirm the booking", async () => {
+    await send(event({ status: "no_payment_required", amount: 0 }));
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "deposit_requested", deposit_paid_at: null });
+  });
+
+  it("a payment in the wrong currency is held for review, not confirmed", async () => {
+    const eur = event({});
+    eur.data.object.currency = "eur";
+    await send(eur);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "deposit_requested", deposit_paid_at: null });
+    expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review" });
+  });
+
+  it("a payment arriving after the booking was cancelled is held for review, not confirmed", async () => {
+    db.table("enquiries")[0].status = "cancelled";
+    await send(event({}));
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "cancelled", deposit_paid_at: null });
+    expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review" });
+  });
+
+  it("ignores Stripe checkouts that aren't booking payments", async () => {
+    const other = event({});
+    other.data.object.metadata = { kind: "gift_card", enquiry_id: enquiryId };
+    await send(other);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "deposit_requested", deposit_paid_at: null });
+    expect(db.table("payments")).toHaveLength(0);
+  });
+
+  it("a paid booking's payment details are not changed by a later webhook", async () => {
+    await send(event({}));
+    const before = { ...db.table("enquiries")[0] };
+    await send(event({ id: "evt_late", pi: "pi_late", amount: 99 }));
+    const after = db.table("enquiries")[0];
+    for (const k of ["deposit_paid_at", "deposit_paid_pence", "stripe_payment_intent_id", "agreed_price_pence", "deposit_pence", "status"]) expect(after[k]).toEqual(before[k]);
   });
 });
 
@@ -369,6 +434,30 @@ describe("Stripe checkout – charges exactly 100% of the agreed price", () => {
     seed({ agreed_price_pence: null, deposit_pence: null });
     const res = await pay({ acceptTerms: "on" });
     expect(res.headers.get("location")).not.toContain("checkout.stripe.com");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("only an actual tick counts as accepting the terms", async () => {
+    seed();
+    for (const v of ["", "false", "off", "yes"]) {
+      const res = await pay({ acceptTerms: v });
+      expect(res.headers.get("location")).toContain("error=terms");
+    }
+    expect(create).not.toHaveBeenCalled();
+    expect(db.table("enquiries")[0].cancellation_terms_accepted_at ?? null).toBeNull();
+  });
+
+  it("won't open a payment page for a booking that is already paid", async () => {
+    seed({ status: "booking_confirmed", deposit_paid_at: "2026-11-23T12:00:00Z", deposit_paid_pence: 37550, cancellation_terms_accepted_at: "2026-11-23T11:00:00Z" });
+    const res = await pay({ acceptTerms: "on" });
+    expect(res.headers.get("location")).not.toContain("checkout.stripe.com");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("refuses a half-price request labelled as a full payment", async () => {
+    seed({ deposit_pence: 18775, payment_type: "full" });
+    const res = await pay({ acceptTerms: "on" });
+    expect(res.headers.get("location")).toContain("error=amount");
     expect(create).not.toHaveBeenCalled();
   });
 

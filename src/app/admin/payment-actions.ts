@@ -66,6 +66,9 @@ export async function agreeFinalPrice(id: string, _prev: PaymentActionState, for
   const enquiry = await loadEnquiry(supabase, id);
   if (!enquiry) return { ok: false, message: "Enquiry not found" };
   if (enquiry.deposit_paid_at) return { ok: false, message: "Payment has already been received, so the agreed price is locked." };
+  if (!["awaiting_consultation", "price_agreed", "deposit_requested"].includes(enquiry.status as string)) {
+    return { ok: false, message: "This enquiry is declined or cancelled. Set it back to 'Awaiting phone consultation' first." };
+  }
 
   const changed =
     enquiry.agreed_price_pence !== pricePence || enquiry.deposit_pence !== request.amountPence || enquiry.payment_type !== paymentType;
@@ -195,6 +198,10 @@ export async function recordBalancePaid(id: string, _prev: PaymentActionState, f
   if (!enquiry) return { ok: false, message: "Enquiry not found" };
   if (!enquiry.deposit_paid_at) return { ok: false, message: "No online payment has been received yet." };
   const balance = (enquiry.agreed_price_pence as number) - (enquiry.deposit_paid_pence as number);
+  // Full payment only: nothing is ever left to pay, and the database no longer accepts "Balance paid"
+  if (enquiry.payment_type === "full" || !(balance > 0)) {
+    return { ok: false, message: "This booking was paid in full – there is no balance to record." };
+  }
   const { error } = await supabase
     .from("enquiries")
     .update({ balance_paid_pence: balance, balance_paid_at: new Date().toISOString(), balance_payment_note: note.slice(0, 300), status: "balance_paid" })

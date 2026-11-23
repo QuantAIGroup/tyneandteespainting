@@ -15,12 +15,16 @@ begin
   end if;
 end $$;
 
-create or replace function pg_temp.expect_reject(label text, stmt text, claims text default '{"role":"service_role"}') returns text language plpgsql as $$
+create or replace function pg_temp.expect_reject(label text, stmt text, claims text default '{"role":"service_role"}', reason text default null) returns text language plpgsql as $$
 begin
   begin
     perform pg_temp.become(claims);
     execute stmt;
   exception when check_violation or not_null_violation or unique_violation or raise_exception or insufficient_privilege then
+    -- When a reason is given, the rejection must come from that rule (not an unrelated one)
+    if reason is not null and position(reason in sqlerrm) = 0 then
+      raise exception 'FAIL  % was rejected for the wrong reason: %', label, sqlerrm;
+    end if;
     return 'PASS  rejected: ' || label || '  [' || sqlerrm || ']';
   end;
   raise exception 'FAIL  accepted but should be rejected: %', label;
@@ -56,18 +60,23 @@ select case when value->'skirting'->>'ratePerMetre' = '6.25'
 -- ---------------------------------------------------------------- rules exist once, exactly as written
 select case when count(*) = 7 then 'PASS  each of the 7 rules exists exactly once after two runs' else 'FAIL  rule count ' || count(*) end
 from pg_constraint where conname in ('enquiries_full_payment_only', 'enquiries_full_payment_amount', 'enquiries_paid_in_full', 'enquiries_payment_needs_consent', 'enquiries_early_start_needs_terms', 'quote_rooms_item_type_check', 'quote_rooms_extra_shape_check');
-select case when count(*) = 3 then 'PASS  triggers attached exactly as intended: payment lock BEFORE UPDATE FOR EACH ROW, delete guard BEFORE DELETE FOR EACH ROW, truncate guard BEFORE TRUNCATE FOR EACH STATEMENT – all enabled'
-  else 'FAIL  trigger configuration' end
-from pg_trigger t where t.tgrelid = 'public.enquiries'::regclass and t.tgenabled = 'O' and (
-     (t.tgname = 'enquiries_protect_payment' and t.tgtype = 19 and t.tgfoid = 'public.protect_payment_fields()'::regprocedure)
-  or (t.tgname = 'enquiries_prevent_paid_delete' and t.tgtype = 11 and t.tgfoid = 'public.prevent_paid_enquiry_delete()'::regprocedure)
-  or (t.tgname = 'enquiries_prevent_paid_truncate' and t.tgtype = 34 and t.tgfoid = 'public.prevent_paid_enquiry_truncate()'::regprocedure));
+select case when count(*) = 7 then 'PASS  triggers attached exactly as intended: payment/status lock BEFORE INSERT OR UPDATE FOR EACH ROW, delete guard BEFORE DELETE FOR EACH ROW, truncate guards on enquiries, quote_rooms, enquiry_photos and payments, payment log append-only – all enabled'
+  else 'FAIL  trigger configuration (' || count(*) || ' of 7)' end
+from pg_trigger t where t.tgenabled = 'O' and (
+     (t.tgrelid = 'public.enquiries'::regclass and t.tgname = 'enquiries_protect_payment' and t.tgtype = 23 and t.tgfoid = 'public.protect_payment_fields()'::regprocedure)
+  or (t.tgrelid = 'public.enquiries'::regclass and t.tgname = 'enquiries_prevent_paid_delete' and t.tgtype = 11 and t.tgfoid = 'public.prevent_paid_enquiry_delete()'::regprocedure)
+  or (t.tgrelid = 'public.enquiries'::regclass and t.tgname = 'enquiries_prevent_paid_truncate' and t.tgtype = 34 and t.tgfoid = 'public.prevent_paid_enquiry_truncate()'::regprocedure)
+  or (t.tgrelid = 'public.quote_rooms'::regclass and t.tgname = 'quote_rooms_prevent_paid_truncate' and t.tgtype = 34 and t.tgfoid = 'public.prevent_paid_enquiry_truncate()'::regprocedure)
+  or (t.tgrelid = 'public.enquiry_photos'::regclass and t.tgname = 'enquiry_photos_prevent_paid_truncate' and t.tgtype = 34 and t.tgfoid = 'public.prevent_paid_enquiry_truncate()'::regprocedure)
+  or (t.tgrelid = 'public.payments'::regclass and t.tgname = 'payments_append_only' and t.tgtype = 27 and t.tgfoid = 'public.protect_payment_log()'::regprocedure)
+  or (t.tgrelid = 'public.payments'::regclass and t.tgname = 'payments_prevent_truncate' and t.tgtype = 34 and t.tgfoid = 'public.protect_payment_log()'::regprocedure));
 select case when (select count(*) from pg_trigger where tgrelid = 'public.enquiries'::regclass and not tgisinternal) = 4
   then 'PASS  no duplicate or stray triggers on enquiries (3 protective + the existing updated_at trigger)' else 'FAIL  unexpected triggers' end;
-select case when count(*) = 2 then 'PASS  delete and truncate guard functions: SECURITY INVOKER, owner postgres, search_path "", owner-only execute'
+select case when count(*) = 3 then 'PASS  guard functions: delete guard SECURITY INVOKER; truncate and payment-log guards SECURITY DEFINER (see all rows despite row-level security); all owner postgres, search_path "", owner-only execute'
   else 'FAIL  guard function properties' end
-from pg_proc p where p.oid in ('public.prevent_paid_enquiry_delete()'::regprocedure, 'public.prevent_paid_enquiry_truncate()'::regprocedure)
-  and not p.prosecdef and pg_get_userbyid(p.proowner) = 'postgres' and p.proconfig = array['search_path=""'] and p.proacl::text = '{postgres=X/postgres}';
+from pg_proc p where ((p.oid = 'public.prevent_paid_enquiry_delete()'::regprocedure and not p.prosecdef)
+    or (p.oid in ('public.prevent_paid_enquiry_truncate()'::regprocedure, 'public.protect_payment_log()'::regprocedure) and p.prosecdef))
+  and pg_get_userbyid(p.proowner) = 'postgres' and p.proconfig = array['search_path=""'] and p.proacl::text = '{postgres=X/postgres}';
 
 -- ---------------------------------------------------------------- security preserved
 select case when not p.prosecdef and pg_get_userbyid(p.proowner) = 'postgres' and p.proconfig = array['search_path=""'] and p.proacl::text = '{postgres=X/postgres}'
@@ -80,6 +89,7 @@ select case when not has_table_privilege('anon', 'public.enquiries', 'SELECT') a
   and not has_table_privilege('anon', 'public.enquiries', 'TRUNCATE') and has_table_privilege('anon', 'public.settings', 'SELECT')
   and not has_column_privilege('anon', 'public.quote_rooms', 'extra_kind', 'SELECT') and not has_column_privilege('anon', 'public.enquiries', 'early_start_requested_at', 'SELECT')
   and has_table_privilege('service_role', 'public.quote_rooms', 'INSERT') and not has_table_privilege('service_role', 'public.enquiries', 'TRUNCATE')
+  and not has_table_privilege('service_role', 'public.payments', 'TRUNCATE') and not has_table_privilege('service_role', 'public.quote_rooms', 'TRUNCATE')
   then 'PASS  table permissions unchanged (visitors: prices only; new columns not readable by visitors; server: no TRUNCATE)'
   else 'FAIL  permissions changed' end;
 
@@ -137,9 +147,17 @@ select pg_temp.expect_reject('payment recorded without the cancellation policy c
 select pg_temp.expect_reject('early-start request without the cancellation policy confirmed', $q$update public.enquiries set early_start_requested_at = now() where reference = 'PRE-1'$q$);
 select pg_temp.expect_ok('website server records the cancellation confirmation only (no early start)', $q$update public.enquiries set cancellation_terms_accepted_at = now() where reference = 'PRE-1'$q$);
 select case when early_start_requested_at is null then 'PASS  accepting the terms did not set an early-start request' else 'FAIL  early start set automatically' end from public.enquiries where reference = 'PRE-1';
+select pg_temp.expect_ok('price agreed (status change via the button)', $q$update public.enquiries set status = 'price_agreed' where reference = 'PRE-1'$q$);
+select pg_temp.expect_ok('payment link sent: price agreed → payment requested', $q$update public.enquiries set status = 'deposit_requested', payment_token = 'tok_1' where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('half payment (50%) of the agreed price', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 18775, stripe_payment_intent_id = 'pi_half50', status = 'booking_confirmed' where reference = 'PRE-1'$q$, '{"role":"service_role"}', 'enquiries_paid_in_full');
+select pg_temp.expect_reject('payment 1p short of the agreed price', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 37549, stripe_payment_intent_id = 'pi_short', status = 'booking_confirmed' where reference = 'PRE-1'$q$, '{"role":"service_role"}', 'enquiries_paid_in_full');
+select pg_temp.expect_reject('payment more than the agreed price', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 37551, stripe_payment_intent_id = 'pi_over', status = 'booking_confirmed' where reference = 'PRE-1'$q$, '{"role":"service_role"}', 'enquiries_paid_in_full');
+select pg_temp.expect_reject('payment recorded without moving to "booking confirmed"', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi_stay' where reference = 'PRE-1'$q$, '{"role":"service_role"}', 'Booking status cannot change');
+select pg_temp.expect_reject('payment recorded but status set to "work completed"', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi_skip', status = 'work_completed' where reference = 'PRE-1'$q$, '{"role":"service_role"}', 'Booking status cannot change');
+select pg_temp.expect_reject('admin login recording a payment', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi_admin', status = 'booking_confirmed' where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}', 'website server');
 select pg_temp.expect_reject('paid amount different from the agreed price', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 18775, stripe_payment_intent_id = 'pi_half', status = 'booking_confirmed' where reference = 'PRE-1'$q$);
 select pg_temp.expect_reject('paid date with NULL paid amount', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = null, stripe_payment_intent_id = 'pi_null', status = 'booking_confirmed' where reference = 'PRE-1'$q$);
-select pg_temp.expect_ok('payment of exactly the agreed price confirms the booking', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi_full', status = 'booking_confirmed', payment_token = 'tok_1' where reference = 'PRE-1'$q$);
+select pg_temp.expect_ok('payment of exactly the agreed price confirms the booking', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi_full', status = 'booking_confirmed' where reference = 'PRE-1'$q$);
 select pg_temp.expect_reject('a second payment recorded on a paid booking', $q$update public.enquiries set deposit_paid_at = now(), stripe_payment_intent_id = 'pi_second' where reference = 'PRE-1'$q$);
 -- After payment the record is locked even for the website server
 select pg_temp.expect_reject('server changing the paid amount', $q$update public.enquiries set deposit_paid_pence = 1 where reference = 'PRE-1'$q$);
@@ -156,6 +174,8 @@ select pg_temp.expect_reject('Stripe receipt link changed once set', $q$update p
 select pg_temp.expect_reject('Stripe customer changed once set', $q$update public.enquiries set stripe_customer_id = 'cus_2' where reference = 'PRE-1'$q$);
 select pg_temp.expect_ok('paid booking moved forward to work completed', $q$update public.enquiries set status = 'work_completed' where reference = 'PRE-1'$q$);
 select pg_temp.expect_ok('paid booking cancelled (refund made in Stripe)', $q$update public.enquiries set status = 'cancelled' where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('cancelled paid booking reopened as confirmed (cancellation is final)', $q$update public.enquiries set status = 'booking_confirmed' where reference = 'PRE-1'$q$, '{"role":"service_role"}', 'Booking status cannot change');
+select pg_temp.expect_reject('admin login reopening a cancelled paid booking', $q$update public.enquiries set status = 'work_completed' where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}', 'Booking status cannot change');
 select pg_temp.expect_ok('admin can add notes to a paid booking', $q$update public.enquiries set admin_notes = 'Refunded in Stripe 24 Nov' where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
 select pg_temp.expect_reject('admin deleting a paid booking', $q$delete from public.enquiries where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
 select pg_temp.expect_reject('server deleting a paid booking', $q$delete from public.enquiries where reference = 'PRE-1'$q$);
@@ -174,3 +194,127 @@ select pg_temp.expect_reject('admin login changing the cancellation confirmation
 select pg_temp.expect_reject('admin login changing an agreed price', $q$update public.enquiries set agreed_price_pence = 1 where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
 select pg_temp.expect_ok('website server recording the cancellation confirmation', $q$update public.enquiries set cancellation_terms_accepted_at = now() where reference = 'PRE-2'$q$);
 select pg_temp.expect_ok('admin can still delete an unpaid enquiry', $q$delete from public.enquiries where reference = 'PRE-2'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
+
+-- ---------------------------------------------------------------- new enquiries
+select pg_temp.expect_ok('website server creates a new enquiry (awaiting consultation, no price)', $q$insert into public.enquiries (reference, full_name, email, phone, postcode, preferred_contact, items, breakdown, pricing_snapshot, estimated_total_pence) values ('NEW-1','N','n@example.invalid','0','NE1','phone','[]','{}','{}',0)$q$);
+select pg_temp.expect_reject('new enquiry created already "booking confirmed" and paid', $q$insert into public.enquiries (reference, full_name, email, phone, postcode, preferred_contact, items, breakdown, pricing_snapshot, estimated_total_pence, status, agreed_price_pence, deposit_pence, consultation_confirmed_at, payment_token, cancellation_terms_accepted_at, deposit_paid_at, deposit_paid_pence, stripe_payment_intent_id) values ('NEW-2','N','n@example.invalid','0','NE1','phone','[]','{}','{}',0,'booking_confirmed',10000,10000,now(),'tok_new2',now(),now(),10000,'pi_new2')$q$, '{"role":"service_role"}', 'must start as awaiting consultation');
+select pg_temp.expect_reject('new enquiry created with an agreed price', $q$insert into public.enquiries (reference, full_name, email, phone, postcode, preferred_contact, items, breakdown, pricing_snapshot, estimated_total_pence, agreed_price_pence, deposit_pence, consultation_confirmed_at) values ('NEW-3','N','n@example.invalid','0','NE1','phone','[]','{}','{}',0,10000,10000,now())$q$, '{"role":"service_role"}', 'must start as awaiting consultation');
+select pg_temp.expect_reject('new enquiry created as "payment requested"', $q$insert into public.enquiries (reference, full_name, email, phone, postcode, preferred_contact, items, breakdown, pricing_snapshot, estimated_total_pence, status) values ('NEW-4','N','n@example.invalid','0','NE1','phone','[]','{}','{}',0,'deposit_requested')$q$, '{"role":"service_role"}', 'must start as awaiting consultation');
+select pg_temp.expect_reject('unknown status on an existing booking', $q$update public.enquiries set status = 'refunded' where reference = 'NEW-1'$q$, '{"role":"service_role"}', 'Unknown booking status');
+select pg_temp.expect_reject('NULL status on an existing booking', $q$update public.enquiries set status = null where reference = 'NEW-1'$q$, '{"role":"service_role"}', 'Unknown booking status');
+select pg_temp.expect_reject('unknown status on a paid booking', $q$update public.enquiries set status = 'refunded' where reference = 'PRE-1'$q$, '{"role":"service_role"}', 'Unknown booking status');
+
+-- ---------------------------------------------------------------- every status change, allowed and refused
+-- Each attempt uses a fresh booking placed directly in the starting state (test set-up only),
+-- then tries the change as the website server (the most privileged API role).
+create or replace function pg_temp.try_transition(kind text, from_s text, to_s text, claims text) returns text language plpgsql as $$
+declare
+  v_id uuid := gen_random_uuid();
+  is_paid boolean := kind = 'paid';
+begin
+  perform set_config('session_replication_role', 'replica', true);
+  insert into public.enquiries (id, reference, full_name, email, phone, postcode, preferred_contact, items, breakdown, pricing_snapshot, estimated_total_pence,
+      payment_type, agreed_price_pence, deposit_pence, consultation_confirmed_at, payment_token, status, cancellation_terms_accepted_at,
+      deposit_paid_at, deposit_paid_pence, stripe_payment_intent_id)
+  values (v_id, 'T-' || v_id, 'T', 't@example.invalid', '0', 'NE1', 'phone', '[]', '{}', '{}', 0,
+      'full', 37550, 37550, now(), 'tok-' || v_id, from_s, now(),
+      case when is_paid then now() end, case when is_paid then 37550 end, case when is_paid then 'pi-' || v_id end);
+  perform set_config('session_replication_role', 'origin', true);
+  begin
+    perform pg_temp.become(claims);
+    if kind = 'payment' then
+      update public.enquiries set status = to_s, deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi-' || v_id where id = v_id;
+    else
+      update public.enquiries set status = to_s where id = v_id;
+    end if;
+    reset role;
+    return 'accepted';
+  exception when others then
+    return 'rejected: ' || sqlerrm;
+  end;
+end $$;
+
+with statuses(s, ord) as (values ('awaiting_consultation',1),('price_agreed',2),('deposit_requested',3),('deposit_paid',4),('booking_confirmed',5),('work_completed',6),('balance_paid',7),('declined',8),('cancelled',9)),
+-- The approved list, written out independently of the migration
+allowed(k) as (values
+  ('unpaid:awaiting_consultation>price_agreed'),('unpaid:awaiting_consultation>declined'),('unpaid:awaiting_consultation>cancelled'),
+  ('unpaid:price_agreed>awaiting_consultation'),('unpaid:price_agreed>deposit_requested'),('unpaid:price_agreed>declined'),('unpaid:price_agreed>cancelled'),
+  ('unpaid:deposit_requested>awaiting_consultation'),('unpaid:deposit_requested>price_agreed'),('unpaid:deposit_requested>declined'),('unpaid:deposit_requested>cancelled'),
+  ('unpaid:declined>awaiting_consultation'),('unpaid:declined>cancelled'),
+  ('unpaid:cancelled>awaiting_consultation'),('unpaid:cancelled>declined'),
+  ('payment:deposit_requested>booking_confirmed'),
+  ('paid:deposit_paid>booking_confirmed'),('paid:deposit_paid>work_completed'),('paid:deposit_paid>cancelled'),
+  ('paid:booking_confirmed>work_completed'),('paid:booking_confirmed>cancelled'),
+  ('paid:work_completed>booking_confirmed'),('paid:work_completed>cancelled')),
+cases as (
+  select kind, f.s as from_s, t.s as to_s, f.ord fo, t.ord tord,
+         (kind || ':' || f.s || '>' || t.s) in (select k from allowed) or (kind <> 'payment' and f.s = t.s) as expected
+  from (values ('unpaid',1),('payment',2),('paid',3)) kinds(kind, ko)
+  cross join statuses f cross join statuses t
+  where (kind in ('unpaid','payment') and f.s in ('awaiting_consultation','price_agreed','deposit_requested','declined','cancelled'))
+     or (kind = 'paid' and f.s in ('deposit_paid','booking_confirmed','work_completed','balance_paid','cancelled'))
+  order by ko, fo, tord)
+select case
+  when expected and r = 'accepted' then 'PASS  allowed   ' || kind || ': ' || from_s || ' → ' || to_s
+  when not expected and r like 'rejected: Booking status cannot change%' then 'PASS  refused   ' || kind || ': ' || from_s || ' → ' || to_s
+  else 'FAIL  ' || kind || ': ' || from_s || ' → ' || to_s || ' expected ' || case when expected then 'allowed' else 'refused by the status rule' end || ' but got ' || r end
+from (select *, pg_temp.try_transition(kind, from_s, to_s, '{"role":"service_role"}') r from cases) x;
+
+-- Admin login: same rules for the status menu
+select case when pg_temp.try_transition('paid', 'booking_confirmed', 'work_completed', '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}') = 'accepted'
+  and pg_temp.try_transition('paid', 'booking_confirmed', 'cancelled', '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}') = 'accepted'
+  and pg_temp.try_transition('paid', 'booking_confirmed', 'price_agreed', '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}') like 'rejected: Booking status cannot change%'
+  and pg_temp.try_transition('unpaid', 'awaiting_consultation', 'booking_confirmed', '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}') like 'rejected: Booking status cannot change%'
+  and pg_temp.try_transition('unpaid', 'deposit_requested', 'cancelled', '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}') = 'accepted'
+  then 'PASS  admin login: confirm/complete/cancel allowed, moving a paid booking back or confirming an unpaid one refused'
+  else 'FAIL  admin login status rules' end;
+
+-- ---------------------------------------------------------------- TRUNCATE by every role that holds the privilege
+select pg_temp.expect_reject('database owner TRUNCATE of room records while a paid booking exists', $q$truncate public.quote_rooms$q$, '', 'cannot be truncated');
+select pg_temp.expect_reject('database owner TRUNCATE of photo records while a paid booking exists', $q$truncate public.enquiry_photos$q$, '', 'cannot be truncated');
+select pg_temp.expect_reject('database owner TRUNCATE of the payment log', $q$truncate public.payments$q$, '', 'cannot be truncated');
+select pg_temp.expect_reject('server TRUNCATE of the payment log (no privilege)', $q$truncate public.payments$q$, '{"role":"service_role"}', 'permission denied');
+-- A role someone GRANTS TRUNCATE to later is stopped by the same guards – including one
+-- subject to row-level security, which cannot itself see the paid bookings
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'test_truncator') then create role test_truncator; end if;
+end $$;
+grant usage on schema public to test_truncator;
+grant select, truncate on public.enquiries, public.quote_rooms, public.enquiry_photos, public.payments to test_truncator;
+create or replace function pg_temp.as_truncator(stmt text) returns text language plpgsql as $$
+begin
+  begin
+    set local role test_truncator;
+    execute stmt;
+  exception when raise_exception then
+    return 'refused: ' || sqlerrm;
+  end;
+  reset role;
+  return 'accepted';
+end $$;
+select case when pg_temp.as_truncator('truncate public.enquiries cascade') like 'refused:%'
+  and pg_temp.as_truncator('truncate public.quote_rooms') like 'refused:%'
+  and pg_temp.as_truncator('truncate public.enquiry_photos') like 'refused:%'
+  and pg_temp.as_truncator('truncate public.payments') like 'refused:%'
+  then 'PASS  a role explicitly granted TRUNCATE is refused on enquiries, room records, photos and the payment log'
+  else 'FAIL  granted TRUNCATE role got through' end;
+select case when (select count(*) from public.enquiries where deposit_paid_at is not null) > 0 and (select count(*) from public.payments) > 0
+  then 'PASS  paid bookings and payment log still present after all TRUNCATE attempts' else 'FAIL  data lost' end;
+revoke all on public.enquiries, public.quote_rooms, public.enquiry_photos, public.payments from test_truncator;
+revoke usage on schema public from test_truncator;
+select case when not exists (
+    select 1 from pg_default_acl d, aclexplode(d.defaclacl) a
+    where d.defaclrole = 'postgres'::regrole and d.defaclnamespace = 'public'::regnamespace and d.defaclobjtype = 'r'
+      and a.grantee in ('anon'::regrole, 'authenticated'::regrole, 'service_role'::regrole) and a.privilege_type in ('TRUNCATE', 'TRIGGER', 'REFERENCES'))
+  then 'PASS  future tables: postgres default privileges no longer give TRUNCATE/TRIGGER/REFERENCES to anon, authenticated or service_role'
+  else 'FAIL  default privileges still grant TRUNCATE' end;
+
+-- ---------------------------------------------------------------- payment log is append-only
+select pg_temp.expect_reject('server editing a payment log entry', $q$update public.payments set amount_pence = 1 where stripe_payment_intent_id = 'pi_full'$q$, '{"role":"service_role"}', 'cannot be changed');
+select pg_temp.expect_reject('server changing a logged outcome', $q$update public.payments set outcome = 'needs_review' where stripe_payment_intent_id = 'pi_full'$q$, '{"role":"service_role"}', 'cannot be changed');
+select pg_temp.expect_reject('server deleting a payment log entry', $q$delete from public.payments where stripe_payment_intent_id = 'pi_full'$q$, '{"role":"service_role"}', 'cannot be deleted');
+select pg_temp.expect_reject('database owner deleting a payment log entry', $q$delete from public.payments$q$, '', 'cannot be deleted');
+select pg_temp.expect_ok('payment log entry needing review for an unpaid enquiry', $q$insert into public.payments (enquiry_id, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind, notes) values ((select id from public.enquiries where reference = 'NEW-1'), 'needs_review', 500, 'gbp', 'cs_r', 'pi_review', 'evt_r', 'full', 'test')$q$);
+select pg_temp.expect_ok('admin deletes that unpaid enquiry', $q$delete from public.enquiries where reference = 'NEW-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
+select case when enquiry_id is null and amount_pence = 500 and outcome = 'needs_review' then 'PASS  its payment log entry is kept (only the enquiry link cleared)' else 'FAIL  log entry changed' end
+from public.payments where stripe_payment_intent_id = 'pi_review';

@@ -75,8 +75,12 @@ describe("booking status rules", () => {
   it("does not allow confirming a booking before a verified deposit", () => {
     for (const s of ["booking_confirmed", "work_completed", "balance_paid"]) {
       expect(canSetStatusManually(s, { status: "deposit_requested", depositPaid: false })).toBe(false);
+    }
+    for (const s of ["booking_confirmed", "work_completed"]) {
       expect(canSetStatusManually(s, { status: "deposit_paid", depositPaid: true })).toBe(true);
     }
+    // Rule change (full payment only): "Balance paid" belonged to the old deposit system and can no longer be entered
+    expect(canSetStatusManually("balance_paid", { status: "deposit_paid", depositPaid: true })).toBe(false);
   });
 
   it("does not allow skipping the price/deposit buttons", () => {

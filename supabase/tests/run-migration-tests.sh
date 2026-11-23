@@ -5,7 +5,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 P="psql -v ON_ERROR_STOP=1 -q -X"
-M=supabase/migrations/20261123170000_price_revision_full_payment.sql
+REAL_M=supabase/migrations/20261123170000_price_revision_full_payment.sql
+# PG16 (local) has no MAINTAIN privilege keyword; Supabase runs PG17. The local
+# copy differs from the real file in that one word only (checked below).
+M=/tmp/price_revision_pg16.sql
+sed 's/references, maintain on tables/references on tables/' "$REAL_M" > "$M"
+[ "$(diff "$REAL_M" "$M" | grep -c '^[<>]')" = 2 ] || { echo "FAIL  local PG16 copy differs from the migration by more than the MAINTAIN keyword"; exit 1; }
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; exit 1; }
 q() { $P -d "$1" -tAc "$2"; }
@@ -67,23 +72,20 @@ echo "== 2. Price list that already has an extras object (with an admin-changed 
 fresh mig_b
 $P -d mig_b -c "update public.settings set value = value || '{\"extras\": {\"door_frame\": 35}}' where key = 'pricing'" >/dev/null
 $P -d mig_b -f "$M" 2>&1 | grep -o 'NOTICE:  Prices.*' | sed 's/^NOTICE:  /INFO  /'
-[ "$(q mig_b "select value->'skirting' = '{\"ratePerMetre\":5.5,\"minimumCharge\":0}'::jsonb and value->'ceiling' = '{\"ratePerSqm\":6,\"minimumCharge\":55}'::jsonb from public.settings where key='pricing'")" = t ] && pass "skirting and ceiling still updated even though extras already existed"
-[ "$(q mig_b "select value->'extras'->>'door_frame' || '/' || (value->'extras'->>'radiator_large') from public.settings where key='pricing'")" = "35/45" ] && pass "admin door-frame price kept (£35); missing extras added (large radiator £45)"
-
+if [ "$(q mig_b "select value->'skirting' = '{\"ratePerMetre\":5.5,\"minimumCharge\":0}'::jsonb and value->'ceiling' = '{\"ratePerSqm\":6,\"minimumCharge\":55}'::jsonb from public.settings where key='pricing'")" = t ]; then pass "skirting and ceiling still updated even though extras already existed"; else fail "skirting and ceiling still updated even though extras already existed"; fi
+if [ "$(q mig_b "select value->'extras'->>'door_frame' || '/' || (value->'extras'->>'radiator_large') from public.settings where key='pricing'")" = "35/45" ]; then pass "admin door-frame price kept (£35); missing extras added (large radiator £45)"; else fail "admin door-frame price kept (£35); missing extras added (large radiator £45)"; fi
 echo "== 3. Admin had already changed the ceiling price before the migration"
 fresh mig_c
 $P -d mig_c -c "update public.settings set value = jsonb_set(value, '{ceiling}', '{\"ratePerSqm\": 7, \"minimumCharge\": 60}') where key = 'pricing'" >/dev/null
 $P -d mig_c -f "$M" 2>&1 | grep -o 'NOTICE:  Prices.*' | sed 's/^NOTICE:  /INFO  /'
-[ "$(q mig_c "select value->'ceiling'->>'ratePerSqm' || '/' || (value->'skirting'->>'ratePerMetre') from public.settings where key='pricing'")" = "7/5.5" ] && pass "admin ceiling price (£7) kept; skirting (still at launch price) updated"
-
+if [ "$(q mig_c "select value->'ceiling'->>'ratePerSqm' || '/' || (value->'skirting'->>'ratePerMetre') from public.settings where key='pricing'")" = "7/5.5" ]; then pass "admin ceiling price (£7) kept; skirting (still at launch price) updated"; else fail "admin ceiling price (£7) kept; skirting (still at launch price) updated"; fi
 echo "== 4. All-or-nothing: a failure at the very last step changes nothing"
 fresh mig_d; seed_customers mig_d
 before=$(state mig_d)
 sed 's/^end$/  raise exception '\''simulated failure at the last step'\'';\nend/' "$M" > /tmp/mig_fail.sql
 grep -q "simulated failure" /tmp/mig_fail.sql || fail "could not inject failure"
 if $P -d mig_d -f /tmp/mig_fail.sql >/dev/null 2>&1; then fail "injected failure did not fail"; fi
-[ "$(state mig_d)" = "$before" ] && pass "after a failure in the final step, prices, columns, rules and the function are exactly as before"
-
+if [ "$(state mig_d)" = "$before" ]; then pass "after a failure in the final step, prices, columns, rules and the function are exactly as before"; else fail "after a failure in the final step, prices, columns, rules and the function are exactly as before"; fi
 echo "== 5. Pre-flight checks stop everything"
 fresh mig_e; $P -d mig_e -c "delete from public.settings where key = 'pricing'" >/dev/null
 expect_stop mig_e "pricing settings record is missing" "pricing record missing"
@@ -120,23 +122,26 @@ echo "== 6. A paid booking from before the migration with no recorded consent"
 fresh mig_r; seed_customers mig_r
 $P -d mig_r -c "select set_config('request.jwt.claims', '{\"role\":\"service_role\"}', false)" -c "update public.enquiries set consultation_confirmed_at = now(), agreed_price_pence = 37550, deposit_pence = 37550, payment_token = 't', status = 'booking_confirmed', deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi_old' where reference = 'PRE-1'" >/dev/null
 expect_stop mig_r "no recorded cancellation-policy confirmation" "paid booking without consent"
-[ "$(q mig_r "select count(*) from information_schema.columns where table_name='enquiries' and column_name='cancellation_terms_accepted_at'")" = 0 ] && pass "the new columns added before that check were rolled back too"
-
+if [ "$(q mig_r "select count(*) from information_schema.columns where table_name='enquiries' and column_name='cancellation_terms_accepted_at'")" = 0 ]; then pass "the new columns added before that check were rolled back too"; else fail "the new columns added before that check were rolled back too"; fi
 echo "== 7. Payment trigger missing or misconfigured beforehand -> re-attached correctly"
 fresh mig_s; $P -d mig_s -c "drop trigger enquiries_protect_payment on public.enquiries" >/dev/null
 $P -d mig_s -f "$M" >/dev/null 2>&1
-[ "$(q mig_s "select count(*) from pg_trigger where tgrelid='public.enquiries'::regclass and tgname='enquiries_protect_payment' and tgtype=19 and tgenabled='O'")" = 1 ] && pass "missing payment trigger re-created as BEFORE UPDATE FOR EACH ROW"
+if [ "$(q mig_s "select count(*) from pg_trigger where tgrelid='public.enquiries'::regclass and tgname='enquiries_protect_payment' and tgtype=23 and tgenabled='O'")" = 1 ]; then pass "missing payment trigger re-created as BEFORE INSERT OR UPDATE FOR EACH ROW"; else fail "missing payment trigger re-created as BEFORE INSERT OR UPDATE FOR EACH ROW"; fi
 fresh mig_t; $P -d mig_t -c "drop trigger enquiries_protect_payment on public.enquiries" -c "create trigger enquiries_protect_payment after update on public.enquiries for each statement execute function public.protect_payment_fields()" >/dev/null
 $P -d mig_t -f "$M" >/dev/null 2>&1
-[ "$(q mig_t "select count(*) from pg_trigger where tgrelid='public.enquiries'::regclass and tgname='enquiries_protect_payment' and tgtype=19")" = 1 ] && pass "wrongly configured (AFTER / FOR EACH STATEMENT) trigger replaced with BEFORE UPDATE FOR EACH ROW"
+if [ "$(q mig_t "select count(*) from pg_trigger where tgrelid='public.enquiries'::regclass and tgname='enquiries_protect_payment' and tgtype=23")" = 1 ]; then pass "wrongly configured (AFTER / FOR EACH STATEMENT) trigger replaced with BEFORE INSERT OR UPDATE FOR EACH ROW"; else fail "wrongly configured (AFTER / FOR EACH STATEMENT) trigger replaced with BEFORE INSERT OR UPDATE FOR EACH ROW"; fi
 fresh mig_u; $P -d mig_u -c "alter table public.enquiries disable trigger enquiries_protect_payment" >/dev/null
 $P -d mig_u -f "$M" >/dev/null 2>&1
-[ "$(q mig_u "select tgenabled from pg_trigger where tgrelid='public.enquiries'::regclass and tgname='enquiries_protect_payment'")" = O ] && pass "a disabled payment trigger is re-enabled"
-
+if [ "$(q mig_u "select tgenabled from pg_trigger where tgrelid='public.enquiries'::regclass and tgname='enquiries_protect_payment'")" = O ]; then pass "a disabled payment trigger is re-enabled"; else fail "a disabled payment trigger is re-enabled"; fi
 echo "== 8. Column problems stop the migration"
 fresh mig_v; $P -d mig_v -c "alter table public.quote_rooms add column quantity text" >/dev/null
 expect_stop mig_v "column quote_rooms.quantity has type text" "a pre-existing 'quantity' column of the wrong type"
 fresh mig_w; $P -d mig_w -c "alter table public.quote_rooms alter column estimated_labour_pence type numeric" >/dev/null
 expect_stop mig_w "column quote_rooms.estimated_labour_pence has type numeric" "estimated_labour_pence not an integer"
+
+echo "== 9. Guards only block when there is something to protect"
+fresh mig_x; seed_customers mig_x; $P -d mig_x -f "$M" >/dev/null 2>&1
+if $P -d mig_x -c "truncate public.enquiries cascade" >/dev/null 2>&1; then pass "owner can TRUNCATE when there are no paid bookings and the payment log is empty"; else fail "truncate guard blocked an empty/unpaid table"; fi
+if [ "$(q mig_x "select count(*) from public.enquiries")" = 0 ]; then pass "tables emptied as requested"; else fail "truncate did not run"; fi
 
 echo "== All migration checks passed"
