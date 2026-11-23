@@ -151,14 +151,22 @@ describe("Stripe webhook – 100% payments", () => {
   const enquiryId = "9b2e7c1a-4d3f-4e5a-8b6c-7d8e9f0a1b2c";
   const stripe = getStripe()!;
   const refunds = vi.fn(async () => ({ id: "re_1" }));
+  // What Stripe says about the payment itself (each test can change it)
+  let stripePayment: Record<string, unknown> = {};
+  const retrievePayment = vi.fn(async (id: string) => ({
+    id, status: "succeeded", amount_received: 37550, currency: "gbp", metadata: { enquiry_id: enquiryId },
+    latest_charge: { receipt_url: "https://pay.stripe.com/receipts/r1" }, ...stripePayment,
+  }));
 
   beforeAll(() => {
-    Object.assign(stripe.paymentIntents, { retrieve: vi.fn(async () => ({ latest_charge: { receipt_url: "https://pay.stripe.com/receipts/r1" } })) });
+    Object.assign(stripe.paymentIntents, { retrieve: retrievePayment });
     Object.assign(stripe.refunds, { create: refunds });
   });
 
   beforeEach(() => {
     refunds.mockClear();
+    retrievePayment.mockClear();
+    stripePayment = {};
     db.table("enquiries").push({
       id: enquiryId,
       reference: "TT-TEST",
@@ -175,6 +183,7 @@ describe("Stripe webhook – 100% payments", () => {
       stripe_payment_intent_id: null,
       payment_token: "tok",
       cancellation_terms_accepted_at: "2026-11-23T12:00:00Z",
+      stripe_checkout_session_id: "cs_1", // saved by the payment page when it opened Stripe checkout
     });
   });
 
@@ -307,6 +316,53 @@ describe("Stripe webhook – 100% payments", () => {
     const after = db.table("enquiries")[0];
     for (const k of ["deposit_paid_at", "deposit_paid_pence", "stripe_payment_intent_id", "agreed_price_pence", "deposit_pence", "status"]) expect(after[k]).toEqual(before[k]);
   });
+
+  // ---- The payment must be the booking's own, confirmed by Stripe itself
+  const notPaid = () => expect(db.table("enquiries")[0]).toMatchObject({ status: "deposit_requested", deposit_paid_at: null });
+
+  it("a payment made on an old/other Stripe checkout page is held for review, not confirmed", async () => {
+    db.table("enquiries")[0].stripe_checkout_session_id = "cs_current";
+    await send(event({}));
+    notPaid();
+    expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review" });
+  });
+
+  it("a payment on a booking with no saved checkout page is held for review", async () => {
+    db.table("enquiries")[0].stripe_checkout_session_id = null;
+    await send(event({}));
+    notPaid();
+  });
+
+  for (const [label, override] of [
+    ["Stripe says the payment hasn't succeeded", { status: "requires_payment_method" }],
+    ["Stripe received a different amount", { amount_received: 18775 }],
+    ["Stripe says the payment wasn't in GBP", { currency: "eur" }],
+    ["the Stripe payment belongs to a different booking", { metadata: { enquiry_id: "00000000-0000-4000-8000-000000000000" } }],
+  ] as const) {
+    it(`not confirmed when ${label}`, async () => {
+      stripePayment = { ...override };
+      await send(event({}));
+      notPaid();
+      expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review" });
+      expect(refunds).not.toHaveBeenCalled();
+    });
+  }
+
+  it("checks the payment with Stripe before confirming", async () => {
+    await send(event({}));
+    expect(retrievePayment).toHaveBeenCalledWith("pi_1");
+  });
+
+  it("if Stripe can't be reached, nothing is marked paid and Stripe is asked to retry", async () => {
+    retrievePayment.mockImplementationOnce(async () => { throw new Error("network down"); });
+    const res = await send(event({}));
+    expect(res.status).toBe(500);
+    notPaid();
+    expect(db.table("stripe_events")).toHaveLength(0); // not marked as handled, so the retry is processed
+    const retry = await send(event({}));
+    expect(retry.status).toBe(200);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "booking_confirmed", stripe_payment_intent_id: "pi_1" });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -322,7 +378,7 @@ describe("Stripe webhook – part-payments can never confirm a booking", () => {
     return stripeWebhook(new Request("http://localhost/api/stripe/webhook", { method: "POST", headers: { "stripe-signature": signature }, body }));
   };
   const seed = (o: Record<string, unknown>) =>
-    db.table("enquiries").push({ id: enquiryId, reference: "TT-PART", status: "deposit_requested", full_name: "Pat", email: "p@example.com", agreed_price_pence: 37550, deposit_pence: 37550, payment_type: "full", deposit_paid_at: null, stripe_payment_intent_id: null, cancellation_terms_accepted_at: "2026-11-23T12:00:00Z", ...o });
+    db.table("enquiries").push({ id: enquiryId, reference: "TT-PART", status: "deposit_requested", full_name: "Pat", email: "p@example.com", agreed_price_pence: 37550, deposit_pence: 37550, payment_type: "full", deposit_paid_at: null, stripe_payment_intent_id: null, cancellation_terms_accepted_at: "2026-11-23T12:00:00Z", stripe_checkout_session_id: "cs_p", ...o });
 
   it("refuses a half payment even if the stored request was altered to half", async () => {
     seed({ deposit_pence: 18775 }); // tampered: 50% stored as if it were "full"
@@ -435,6 +491,18 @@ describe("Stripe checkout – charges exactly 100% of the agreed price", () => {
     const res = await pay({ acceptTerms: "on" });
     expect(res.headers.get("location")).not.toContain("checkout.stripe.com");
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it("closes an old open Stripe page for a different amount before opening a new one", async () => {
+    seed({ stripe_checkout_session_id: "cs_old" });
+    const retrieve = vi.fn(async () => ({ id: "cs_old", status: "open", amount_total: 18775, url: "https://checkout.stripe.com/c/cs_old" }));
+    const expire = vi.fn(async () => ({}));
+    Object.assign(stripe.checkout.sessions, { retrieve, expire });
+    const res = await pay({ acceptTerms: "on" });
+    expect(expire).toHaveBeenCalledWith("cs_old");
+    expect(res.headers.get("location")).toBe("https://checkout.stripe.com/c/cs_new");
+    expect(db.table("enquiries")[0].stripe_checkout_session_id).toBe("cs_new");
+    Object.assign(stripe.checkout.sessions, { retrieve: vi.fn(), expire: vi.fn() });
   });
 
   it("only an actual tick counts as accepting the terms", async () => {

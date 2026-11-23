@@ -73,12 +73,16 @@ export interface EnquiryPaymentState {
   agreedPricePence?: number | null;
   /** When given (the live webhook always gives it), a payment can only confirm a booking if the cancellation policy was confirmed. */
   termsAcceptedAt?: string | null;
+  /** When given (the live webhook always gives it), the payment must come from this Stripe checkout page – the one the payment page saved on the booking. */
+  checkoutSessionId?: string | null;
 }
 
 export interface StripePaymentReport {
   amountPence: number;
   currency: string;
   paymentIntentId: string;
+  /** The Stripe checkout page the payment was made on. */
+  checkoutSessionId?: string;
 }
 
 export type DepositDecision =
@@ -96,6 +100,9 @@ export function decideDepositOutcome(enquiry: EnquiryPaymentState | null, paymen
   if (enquiry.stripePaymentIntentId === payment.paymentIntentId) return { action: "already_recorded" };
   if (enquiry.depositPaidAt) return { action: "refund_duplicate", reason: "A deposit had already been paid for this booking" };
   if (payment.currency.toLowerCase() !== "gbp") return { action: "needs_review", reason: `Unexpected currency ${payment.currency}` };
+  if (enquiry.checkoutSessionId !== undefined && payment.checkoutSessionId !== undefined && (!enquiry.checkoutSessionId || enquiry.checkoutSessionId !== payment.checkoutSessionId)) {
+    return { action: "needs_review", reason: `Paid on Stripe checkout ${payment.checkoutSessionId}, which is not this booking's current payment page (${enquiry.checkoutSessionId ?? "none"})` };
+  }
   if (enquiry.termsAcceptedAt === null) {
     return { action: "needs_review", reason: "The customer's confirmation of the cancellation policy was not recorded before payment" };
   }

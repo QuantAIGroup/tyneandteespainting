@@ -1,5 +1,5 @@
 -- =====================================================================
--- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 6, after safety review)
+-- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 7, after safety review)
 -- Run AFTER the earlier migrations.
 --
 -- ALL-OR-NOTHING: the whole migration is ONE statement (a single DO block),
@@ -162,6 +162,38 @@ begin
       raise exception 'Stopped: column % has type % (expected %). Nothing was changed.', col, col_type, split_part(grp, ':', 2);
     end if;
   end loop;
+
+  -- 0s. Booking statuses. Existing records are never changed: anything
+  --     unexpected stops the migration and is reported.
+  --     (i) every status must be one of the nine permitted statuses (NULL included in the check)
+  select count(*), string_agg(format('%s (%s)', coalesce(quote_literal(st), 'NULL'), cnt), ', ' order by st)
+    into n, k
+  from (select status as st, count(*) as cnt from public.enquiries
+        where status is null or status not in ('awaiting_consultation', 'price_agreed', 'deposit_requested', 'deposit_paid',
+                                               'booking_confirmed', 'work_completed', 'balance_paid', 'declined', 'cancelled')
+        group by status) x;
+  if n > 0 then
+    select string_agg(reference, ', ' order by reference) into f from (
+      select reference from public.enquiries
+      where status is null or status not in ('awaiting_consultation', 'price_agreed', 'deposit_requested', 'deposit_paid',
+                                             'booking_confirmed', 'work_completed', 'balance_paid', 'declined', 'cancelled')
+      order by reference limit 20) r;
+    raise exception 'Stopped: existing enquiries have unexpected statuses: % – references: %. Nothing was changed.', k, f;
+  end if;
+  --     (ii) a paid booking must be in a paid (or cancelled) status, or it could never move again
+  select count(*), string_agg(reference || ' (' || status || ')', ', ' order by reference) into n, k
+  from (select reference, status from public.enquiries
+        where deposit_paid_at is not null
+          and status not in ('deposit_paid', 'booking_confirmed', 'work_completed', 'balance_paid', 'cancelled')
+        order by reference limit 20) x;
+  if n > 0 then
+    raise exception 'Stopped: paid bookings have an unpaid status: %. Nothing was changed.', k;
+  end if;
+  --     (iii) the two old deposit-era statuses are still recognised, but can no longer be entered – report any in use
+  select count(*) into n from public.enquiries where status in ('deposit_paid', 'balance_paid');
+  if n > 0 then
+    raise notice 'Note: % existing booking(s) use the old deposit-era statuses (deposit_paid / balance_paid). They are kept as they are.', n;
+  end if;
 
   -- 0a. Price list: exists, is an object, every group well-formed.
   --     (CASE guards every cast, so bad data gives a clear message, never a cast error.)
@@ -456,6 +488,16 @@ begin
       when new.deposit_paid_at is not null then 'payment'
       else 'unpaid'
     end;
+
+    -- ---------- A payment must come from this booking's own Stripe checkout page
+    --            (the one the payment page saved), with its Stripe payment reference
+    if change_kind = 'payment' then
+      if old.stripe_checkout_session_id is null
+         or new.stripe_checkout_session_id is distinct from old.stripe_checkout_session_id
+         or new.stripe_payment_intent_id is null then
+        raise exception 'A payment can only be recorded against this booking''s own Stripe checkout, with its Stripe payment reference';
+      end if;
+    end if;
     if change_kind = 'payment' or new.status is distinct from old.status then
       if not ((change_kind || ':' || old.status || '>' || new.status) = any (allowed_transitions)) then
         raise exception 'Booking status cannot change from % to % (%)', old.status, new.status,
@@ -546,6 +588,29 @@ begin
   $fn$;
   revoke all on function public.protect_payment_log() from public, anon, authenticated;
 
+  -- Room and extra records of a paid booking are what the customer paid for:
+  -- they can't be added to, changed or removed afterwards. SECURITY DEFINER so
+  -- the check always sees the booking, whatever the caller's row-level access.
+  create or replace function public.protect_paid_quote_rooms()
+  returns trigger
+  language plpgsql
+  security definer
+  set search_path = ''
+  as $fn$
+  begin
+    if tg_op in ('UPDATE', 'DELETE')
+       and exists (select 1 from public.enquiries where id = old.enquiry_id and deposit_paid_at is not null) then
+      raise exception 'Room records of a paid booking cannot be changed or removed';
+    end if;
+    if tg_op in ('INSERT', 'UPDATE')
+       and exists (select 1 from public.enquiries where id = new.enquiry_id and deposit_paid_at is not null) then
+      raise exception 'Room records cannot be added to a paid booking';
+    end if;
+    return case when tg_op = 'DELETE' then old else new end;
+  end;
+  $fn$;
+  revoke all on function public.protect_paid_quote_rooms() from public, anon, authenticated;
+
   -- New tables created by postgres in this schema would otherwise give the
   -- website server TRUNCATE/TRIGGER/REFERENCES/MAINTAIN automatically
   -- (existing tables were already corrected by the api_grants migration).
@@ -574,6 +639,10 @@ begin
   create trigger enquiry_photos_prevent_paid_truncate before truncate on public.enquiry_photos
     for each statement execute function public.prevent_paid_enquiry_truncate();
 
+  drop trigger if exists quote_rooms_protect_paid on public.quote_rooms;
+  create trigger quote_rooms_protect_paid before insert or update or delete on public.quote_rooms
+    for each row execute function public.protect_paid_quote_rooms();
+
   drop trigger if exists payments_append_only on public.payments;
   create trigger payments_append_only before update or delete on public.payments
     for each row execute function public.protect_payment_log();
@@ -587,7 +656,7 @@ begin
   --    migration is rolled back.
   -- ===================================================================
   -- name:expected SECURITY DEFINER
-  foreach grp in array array['protect_payment_fields:false', 'prevent_paid_enquiry_delete:false', 'prevent_paid_enquiry_truncate:true', 'protect_payment_log:true'] loop
+  foreach grp in array array['protect_payment_fields:false', 'prevent_paid_enquiry_delete:false', 'prevent_paid_enquiry_truncate:true', 'protect_payment_log:true', 'protect_paid_quote_rooms:true'] loop
     k := split_part(grp, ':', 1);
     select p.prosecdef, pg_get_userbyid(p.proowner), p.proconfig,
            (select count(*) from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
@@ -619,6 +688,7 @@ begin
     'enquiries:enquiries_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',        -- BEFORE TRUNCATE, FOR EACH STATEMENT
     'quote_rooms:quote_rooms_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',
     'enquiry_photos:enquiry_photos_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',
+    'quote_rooms:quote_rooms_protect_paid:protect_paid_quote_rooms:31',              -- BEFORE INSERT OR UPDATE OR DELETE, FOR EACH ROW
     'payments:payments_append_only:protect_payment_log:27',                     -- BEFORE UPDATE OR DELETE, FOR EACH ROW
     'payments:payments_prevent_truncate:protect_payment_log:34'
   ] loop
@@ -640,16 +710,44 @@ begin
     raise exception 'Verification failed: protect_payment_fields is attached % times (expected 1)', n;
   end if;
 
-  -- Every role that can TRUNCATE or DELETE from these tables is covered by the
-  -- triggers above (triggers apply to all roles). Report who they are.
+  -- Exact table permissions for PUBLIC and the three API roles on the four
+  -- booking tables. Anything different stops the migration (permissions are
+  -- verified, not silently changed).
+  --   anon:          nothing
+  --   authenticated: enquiries SELECT/UPDATE/DELETE; others SELECT only (admin access, still limited by row-level security)
+  --   service_role:  SELECT/INSERT/UPDATE/DELETE (the website server)
+  --   nobody:        TRUNCATE, REFERENCES, TRIGGER (and MAINTAIN on PostgreSQL 17+)
+  foreach grp in array array[
+    'anon:enquiries:', 'anon:quote_rooms:', 'anon:enquiry_photos:', 'anon:payments:',
+    'authenticated:enquiries:SELECT,UPDATE,DELETE', 'authenticated:quote_rooms:SELECT',
+    'authenticated:enquiry_photos:SELECT', 'authenticated:payments:SELECT',
+    'service_role:enquiries:SELECT,INSERT,UPDATE,DELETE', 'service_role:quote_rooms:SELECT,INSERT,UPDATE,DELETE',
+    'service_role:enquiry_photos:SELECT,INSERT,UPDATE,DELETE', 'service_role:payments:SELECT,INSERT,UPDATE,DELETE'
+  ] loop
+    fields := array['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'];
+    if current_setting('server_version_num')::int >= 170000 then
+      fields := fields || 'MAINTAIN';
+    end if;
+    foreach f in array fields loop
+      if has_table_privilege(split_part(grp, ':', 1), format('public.%I', split_part(grp, ':', 2)), f)
+         is distinct from coalesce(f = any (string_to_array(nullif(split_part(grp, ':', 3), ''), ',')), false) then
+        raise exception 'Verification failed: % % on % is not as intended', split_part(grp, ':', 1), f, split_part(grp, ':', 2);
+      end if;
+    end loop;
+  end loop;
+  select count(*) into n
+  from pg_class c, aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
+  where c.oid in ('public.enquiries'::regclass, 'public.quote_rooms'::regclass, 'public.enquiry_photos'::regclass, 'public.payments'::regclass)
+    and a.grantee = 0;
+  if n > 0 then
+    raise exception 'Verification failed: PUBLIC has privileges on a booking table';
+  end if;
+
+  -- Roles that CAN truncate (owner/superuser or any later grant) are all subject to the guards above
   select string_agg(distinct r.rolname, ', ' order by r.rolname) into k
   from pg_roles r
   cross join (values ('public.enquiries'), ('public.quote_rooms'), ('public.enquiry_photos'), ('public.payments')) t(tbl)
   where has_table_privilege(r.oid, t.tbl::regclass, 'TRUNCATE');
   raise notice 'Roles able to TRUNCATE booking tables (all subject to the truncate guards): %', coalesce(k, 'none');
-  if has_table_privilege('anon', 'public.enquiries', 'TRUNCATE') or has_table_privilege('authenticated', 'public.enquiries', 'TRUNCATE')
-     or has_table_privilege('service_role', 'public.enquiries', 'TRUNCATE') or has_table_privilege('service_role', 'public.payments', 'TRUNCATE') then
-    raise exception 'Verification failed: an API role can TRUNCATE booking tables';
-  end if;
 end
 $migration$;

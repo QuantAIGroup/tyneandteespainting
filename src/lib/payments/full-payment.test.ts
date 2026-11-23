@@ -136,3 +136,27 @@ describe("Stripe checkout helper refuses anything but 100% with consent", async 
     expect(calls).toHaveLength(1);
   });
 });
+
+describe("payment must come from the booking's own Stripe checkout page", () => {
+  const base: EnquiryPaymentState = {
+    id: "e1", status: "deposit_requested", depositPence: 37550, depositPaidAt: null, stripePaymentIntentId: null,
+    paymentType: "full", agreedPricePence: 37550, termsAcceptedAt: "2026-11-23T12:00:00Z", checkoutSessionId: "cs_1",
+  };
+  const pay = { amountPence: 37550, currency: "gbp", paymentIntentId: "pi_1", checkoutSessionId: "cs_1" };
+
+  it("confirms a payment made on the saved checkout page", () => {
+    expect(decideDepositOutcome(base, pay).action).toBe("mark_paid");
+  });
+  it("holds a payment made on a different checkout page for review", () => {
+    expect(decideDepositOutcome(base, { ...pay, checkoutSessionId: "cs_old" }).action).toBe("needs_review");
+  });
+  it("holds a payment for review when no checkout page was saved", () => {
+    expect(decideDepositOutcome({ ...base, checkoutSessionId: null }, pay).action).toBe("needs_review");
+  });
+  it("still refunds a genuine second payment, whichever page it came from", () => {
+    expect(decideDepositOutcome({ ...base, depositPaidAt: "x", stripePaymentIntentId: "pi_1" }, { ...pay, paymentIntentId: "pi_2", checkoutSessionId: "cs_old" }).action).toBe("refund_duplicate");
+  });
+  it("currency must be GBP", () => {
+    expect(decideDepositOutcome(base, { ...pay, currency: "usd" }).action).toBe("needs_review");
+  });
+});

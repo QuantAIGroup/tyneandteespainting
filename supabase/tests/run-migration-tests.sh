@@ -144,4 +144,23 @@ fresh mig_x; seed_customers mig_x; $P -d mig_x -f "$M" >/dev/null 2>&1
 if $P -d mig_x -c "truncate public.enquiries cascade" >/dev/null 2>&1; then pass "owner can TRUNCATE when there are no paid bookings and the payment log is empty"; else fail "truncate guard blocked an empty/unpaid table"; fi
 if [ "$(q mig_x "select count(*) from public.enquiries")" = 0 ]; then pass "tables emptied as requested"; else fail "truncate did not run"; fi
 
+echo "== 10. Existing records with unexpected statuses stop the migration (records are not changed)"
+fresh mig_y; seed_customers mig_y
+$P -d mig_y -c "alter table public.enquiries drop constraint enquiries_status_check; update public.enquiries set status = 'quote_sent' where reference = 'PRE-2'" >/dev/null
+expect_stop mig_y "unexpected statuses: 'quote_sent' (1) – references: PRE-2" "an enquiry with the old status 'quote_sent'"
+if [ "$(q mig_y "select status from public.enquiries where reference = 'PRE-2'")" = quote_sent ]; then pass "the unexpected status was left exactly as it was"; else fail "record changed"; fi
+$P -d mig_y -c "update public.enquiries set status = null where reference = 'PRE-2'" >/dev/null 2>&1 || $P -d mig_y -c "alter table public.enquiries alter column status drop not null; update public.enquiries set status = null where reference = 'PRE-2'" >/dev/null
+expect_stop mig_y "unexpected statuses: NULL (1)" "an enquiry with no status"
+fresh mig_z; seed_customers mig_z
+$P -d mig_z -c "set request.jwt.claims = '{\"role\":\"service_role\"}'" -c "update public.enquiries set deposit_paid_at = now(), stripe_payment_intent_id = 'pi_x', deposit_paid_pence = 1 where reference = 'PRE-2'" >/dev/null
+expect_stop mig_z "paid bookings have an unpaid status: PRE-2 (awaiting_consultation)" "a paid booking still marked awaiting consultation"
+
+echo "== 11. Unexpected permissions stop the migration (permissions are verified, not silently changed)"
+for g in "grant truncate on public.payments to authenticated" "grant insert on public.payments to anon" "grant trigger on public.enquiries to service_role" "grant select on public.quote_rooms to public"; do
+  fresh mig_p2; seed_customers mig_p2; $P -d mig_p2 -c "$g" >/dev/null
+  if $P -d mig_p2 -f "$M" >/dev/null 2>/tmp/mig.err; then fail "migration accepted: $g"; fi
+  grep -q "Verification failed" /tmp/mig.err || { cat /tmp/mig.err; fail "wrong error for: $g"; }
+  if [ "$(q mig_p2 "select count(*) from pg_constraint where conname = 'enquiries_full_payment_only'")" = 0 ]; then pass "'$g' -> stopped and rolled back ($(grep -o 'Verification failed:.*' /tmp/mig.err | cut -c22- | head -1))"; else fail "not rolled back"; fi
+done
+
 echo "== All migration checks passed"

@@ -62,6 +62,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/pay/[token]
       if (existing.status === "open" && existing.amount_total === booking.depositPence && existing.url) {
         return NextResponse.redirect(existing.url, 303);
       }
+      // An old page for a different amount must not stay payable
+      if (existing.status === "open") await expireCheckoutSession(stripe, existing.id);
     }
 
     const business = await getBusinessSettings();

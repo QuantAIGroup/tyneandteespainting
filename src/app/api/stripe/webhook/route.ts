@@ -109,7 +109,7 @@ async function handlePaidSession(
     ? await supabase
         .from("enquiries")
         .select(
-          "id, reference, status, full_name, email, agreed_service, agreed_price_pence, deposit_pence, payment_type, deposit_percent, deposit_paid_at, stripe_payment_intent_id, payment_token, cancellation_terms_accepted_at",
+          "id, reference, status, full_name, email, agreed_service, agreed_price_pence, deposit_pence, payment_type, deposit_percent, deposit_paid_at, stripe_payment_intent_id, payment_token, cancellation_terms_accepted_at, stripe_checkout_session_id",
         )
         .eq("id", enquiryId)
         .maybeSingle()
@@ -130,9 +130,11 @@ async function handlePaidSession(
           agreedPricePence: enquiry.agreed_price_pence as number | null,
           // A booking can only be confirmed if the cancellation policy was confirmed first
           termsAcceptedAt: (enquiry.cancellation_terms_accepted_at as string | null) ?? null,
+          // ...and only if it was made on the checkout page saved on this booking
+          checkoutSessionId: (enquiry.stripe_checkout_session_id as string | null) ?? null,
         }
       : null,
-    { amountPence, currency, paymentIntentId },
+    { amountPence, currency, paymentIntentId, checkoutSessionId: session.id },
   );
 
   const logPayment = (outcome: string, notes?: string) =>
@@ -153,7 +155,16 @@ async function handlePaidSession(
 
   if (decision.action === "already_recorded") return;
 
+  let reviewReason: string | null = decision.action === "needs_review" ? decision.reason : null;
+
   if (decision.action === "mark_paid" && enquiry) {
+    // Ask Stripe directly about the payment itself, rather than relying only on the checkout summary.
+    // If Stripe can't be reached this throws → 500 → Stripe retries later; nothing is marked paid.
+    const check = await confirmWithStripe(stripe, paymentIntentId, amountPence, enquiry.id as string);
+    if (!check.ok) reviewReason = check.reason;
+  }
+
+  if (decision.action === "mark_paid" && enquiry && reviewReason === null) {
     // Atomic: only succeeds if the booking hasn't been paid in the meantime
     const { data: updated, error: updateError } = await supabase
       .from("enquiries")
@@ -209,8 +220,7 @@ async function handlePaidSession(
   }
 
   // needs_review – money received but something doesn't match. Not marked as paid.
-  const reason =
-    decision.action === "needs_review" ? decision.reason : "Unexpected payment";
+  const reason = reviewReason ?? "Unexpected payment";
   const { error: logError } = await logPayment("needs_review", reason);
   if (logError) throw new Error(logError.message);
   await sendNotification(
@@ -225,6 +235,25 @@ async function handlePaidSession(
       "Please check it in Stripe and refund it if needed.",
     ],
   );
+}
+
+/**
+ * Confirms the payment with Stripe itself: it must have succeeded, for exactly
+ * the amount due, in GBP, and belong to this booking. Throws if Stripe can't be
+ * reached (the webhook then fails and Stripe retries).
+ */
+async function confirmWithStripe(
+  stripe: Stripe,
+  paymentIntentId: string,
+  amountPence: number,
+  enquiryId: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
+  if (pi.status !== "succeeded") return { ok: false, reason: `Stripe reports the payment as "${pi.status}", not succeeded` };
+  if (pi.amount_received !== amountPence) return { ok: false, reason: `Stripe received ${pi.amount_received}p, not ${amountPence}p` };
+  if ((pi.currency ?? "").toLowerCase() !== "gbp") return { ok: false, reason: `Stripe payment currency is ${pi.currency}, not GBP` };
+  if (pi.metadata?.enquiry_id !== enquiryId) return { ok: false, reason: "The Stripe payment does not belong to this booking" };
+  return { ok: true };
 }
 
 /** Stripe's receipt link for the payment (shown to you and the customer). */
