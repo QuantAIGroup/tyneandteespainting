@@ -106,6 +106,9 @@ export async function sendPaymentLink(id: string): Promise<PaymentActionState> {
   if (!enquiry) return { ok: false, message: "Enquiry not found" };
   if (enquiry.deposit_paid_at) return { ok: false, message: "Payment has already been received – no payment link is needed." };
   if (!enquiry.agreed_price_pence || !enquiry.deposit_pence) return { ok: false, message: "Agree the final price with the customer first." };
+  if (enquiry.payment_type !== "full" || enquiry.deposit_pence !== enquiry.agreed_price_pence) {
+    return { ok: false, message: "Please approve the quotation again – the customer must pay 100% of the agreed price." };
+  }
   if (!["price_agreed", "deposit_requested"].includes(enquiry.status as string)) {
     return { ok: false, message: "A payment can only be requested once the price has been agreed." };
   }

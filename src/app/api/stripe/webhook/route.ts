@@ -125,6 +125,9 @@ async function handlePaidSession(
           depositPaidAt: enquiry.deposit_paid_at as string | null,
           stripePaymentIntentId: enquiry.stripe_payment_intent_id as
             string | null,
+          // Only a full payment of the agreed price confirms a booking
+          paymentType: (enquiry.payment_type as string | null) ?? null,
+          agreedPricePence: enquiry.agreed_price_pence as number | null,
         }
       : null,
     { amountPence, currency, paymentIntentId },

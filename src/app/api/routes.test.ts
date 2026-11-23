@@ -32,6 +32,7 @@ vi.mock("@/lib/settings", () => ({
 const { POST: submitEnquiry } = await import("./enquiries/route");
 const { POST: signUpload } = await import("./uploads/sign/route");
 const { POST: stripeWebhook } = await import("./stripe/webhook/route");
+const { POST: startCheckout } = await import("./pay/[token]/checkout/route");
 const { getStripe } = await import("@/lib/payments/stripe");
 
 const json = (body: unknown) => new Request("http://localhost/api", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -69,8 +70,11 @@ describe("quote request submission", () => {
     expect(rooms).toHaveLength(4);
     expect(rooms[0]).toMatchObject({ item_type: "bedroom", length_m: 4, ceiling_area_sqm: 14, estimated_labour_pence: 28200 });
     expect(rooms[1]).toMatchObject({ item_type: "skirting", skirting_length_m: 8.5, estimated_labour_pence: 4675 });
-    expect(rooms[2]).toMatchObject({ item_type: "extra", extra_kind: "door_frame", quantity: 3, unit_price_pence: 3000, estimated_labour_pence: 9000, coats: null });
-    expect(rooms[3]).toMatchObject({ item_type: "extra", extra_kind: "sash_window", unit_price_pence: null, estimated_labour_pence: null, requires_manual_quote: true });
+    // Matches the database rule: fixed extras store kind, quantity and unit price, and total = quantity × unit price
+    expect(rooms[2]).toMatchObject({ item_type: "extra", extra_kind: "door_frame", quantity: 3, unit_price_pence: 3000, estimated_labour_pence: 9000, requires_manual_quote: false, coats: null, condition: null });
+    expect(rooms[3]).toMatchObject({ item_type: "extra", extra_kind: "sash_window", quantity: 1, unit_price_pence: null, estimated_labour_pence: null, requires_manual_quote: true });
+    // Measured rooms carry no extra fields
+    expect(rooms[0]).toMatchObject({ extra_kind: null, quantity: null, unit_price_pence: null, coats: 2 });
 
     expect(db.table("enquiry_photos")).toEqual([expect.objectContaining({ enquiry_id: enquiry.id, storage_path: photoPath, content_type: "image/jpeg" })]);
     expect(emails[0].subject).toContain("New painting enquiry");
@@ -219,5 +223,103 @@ describe("Stripe webhook – 100% payments", () => {
     expect(refunds).toHaveBeenCalledWith({ payment_intent: "pi_2", reason: "duplicate" }, expect.anything());
     expect(db.table("enquiries")[0]).toMatchObject({ status: "booking_confirmed", stripe_payment_intent_id: "pi_1" });
     expect(db.table("payments").map((p) => p.outcome)).toEqual(["deposit_recorded", "duplicate_refunded"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Stripe webhook – part-payments can never confirm a booking", () => {
+  const enquiryId = "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f";
+  const stripe = getStripe()!;
+  const send = (amount: number) => {
+    const body = JSON.stringify({
+      id: `evt_part_${amount}`, object: "event", type: "checkout.session.completed",
+      data: { object: { id: "cs_p", object: "checkout.session", payment_status: "paid", amount_total: amount, currency: "gbp", payment_intent: `pi_part_${amount}`, customer: null, client_reference_id: enquiryId, metadata: { kind: "full", enquiry_id: enquiryId } } },
+    });
+    const signature = stripe.webhooks.generateTestHeaderString({ payload: body, secret: process.env.STRIPE_WEBHOOK_SECRET! });
+    return stripeWebhook(new Request("http://localhost/api/stripe/webhook", { method: "POST", headers: { "stripe-signature": signature }, body }));
+  };
+  const seed = (o: Record<string, unknown>) =>
+    db.table("enquiries").push({ id: enquiryId, reference: "TT-PART", status: "deposit_requested", full_name: "Pat", email: "p@example.com", agreed_price_pence: 37550, deposit_pence: 37550, payment_type: "full", deposit_paid_at: null, stripe_payment_intent_id: null, ...o });
+
+  it("refuses a half payment even if the stored request was altered to half", async () => {
+    seed({ deposit_pence: 18775 }); // tampered: 50% stored as if it were "full"
+    await send(18775);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "deposit_requested", deposit_paid_at: null });
+    expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review", notes: expect.stringContaining("not 100% of the agreed price") });
+  });
+
+  it("refuses an old-style 50% deposit request", async () => {
+    seed({ deposit_pence: 18775, payment_type: "deposit", deposit_percent: 50 });
+    await send(18775);
+    expect(db.table("enquiries")[0].deposit_paid_at).toBeNull();
+    expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review", notes: expect.stringContaining("Only full payment") });
+  });
+
+  it("refuses an overpayment", async () => {
+    seed({});
+    await send(40000);
+    expect(db.table("enquiries")[0].deposit_paid_at).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("Stripe checkout – charges exactly 100% of the agreed price", () => {
+  const token = "A".repeat(43);
+  const enquiryId = "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b";
+  const stripe = getStripe()!;
+  const create = vi.fn(async (params: Record<string, unknown>) => ({ id: "cs_new", url: "https://checkout.stripe.com/c/cs_new", status: "open", amount_total: (params?.line_items as { price_data: { unit_amount: number } }[] | undefined)?.[0]?.price_data.unit_amount }));
+
+  beforeAll(() => {
+    Object.assign(stripe.checkout.sessions, { create, retrieve: vi.fn(), expire: vi.fn() });
+  });
+  beforeEach(() => create.mockClear());
+
+  const seed = (o: Record<string, unknown> = {}) =>
+    db.table("enquiries").push({
+      id: enquiryId, reference: "TT-PAY", status: "deposit_requested", full_name: "Sam Customer", email: "sam@example.com", agreed_service: "Bedroom walls",
+      estimated_total_pence: 34000, agreed_price_pence: 37550, deposit_pence: 37550, payment_type: "full", deposit_percent: null,
+      deposit_paid_at: null, deposit_requested_at: "2026-11-23T12:00:00Z", stripe_checkout_session_id: null, payment_token: token, ...o,
+    });
+  const pay = (fields: Record<string, string>) =>
+    startCheckout(new Request(`http://localhost/api/pay/${token}/checkout`, { method: "POST", body: new URLSearchParams(fields) }), { params: Promise.resolve({ token }) });
+
+  it("sends Stripe exactly the agreed price in GBP – not the estimate", async () => {
+    seed();
+    const res = await pay({ acceptTerms: "on" });
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("https://checkout.stripe.com/c/cs_new");
+    expect(create).toHaveBeenCalledTimes(1);
+    const params = create.mock.calls[0][0] as { line_items: { quantity: number; price_data: { unit_amount: number; currency: string } }[]; currency: string; metadata: Record<string, string> };
+    expect(params.line_items).toHaveLength(1);
+    expect(params.line_items[0]).toMatchObject({ quantity: 1, price_data: { unit_amount: 37550, currency: "gbp" } });
+    expect(params.metadata).toMatchObject({ kind: "full", agreed_price_pence: "37550", deposit_pence: "37550" });
+    expect(db.table("enquiries")[0].cancellation_terms_accepted_at).toBeTruthy();
+    expect(db.table("enquiries")[0].early_start_requested_at).toBeNull();
+  });
+
+  it("ignores any amount sent from the browser", async () => {
+    seed();
+    await pay({ acceptTerms: "on", amount: "1", deposit_pence: "1", unit_amount: "1" });
+    expect((create.mock.calls[0][0] as { line_items: { price_data: { unit_amount: number } }[] }).line_items[0].price_data.unit_amount).toBe(37550);
+  });
+
+  it("records an early-start request when ticked", async () => {
+    seed();
+    await pay({ acceptTerms: "on", earlyStart: "on" });
+    expect(db.table("enquiries")[0].early_start_requested_at).toBeTruthy();
+  });
+
+  it("won't open the payment page until the cancellation policy is confirmed", async () => {
+    seed();
+    const res = await pay({});
+    expect(res.headers.get("location")).toContain("error=terms");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("refuses to charge anything other than 100% of the agreed price", async () => {
+    seed({ deposit_pence: 18775, payment_type: "deposit", deposit_percent: 50 });
+    const res = await pay({ acceptTerms: "on" });
+    expect(res.headers.get("location")).toContain("error=amount");
+    expect(create).not.toHaveBeenCalled();
   });
 });

@@ -63,9 +63,16 @@ export function canSetStatusManually(target: string, b: { status: string; deposi
 export interface EnquiryPaymentState {
   id: string;
   status: string;
+  /** The amount requested from the customer (for new bookings: 100% of the agreed price). */
   depositPence: number | null;
   depositPaidAt: string | null;
   stripePaymentIntentId: string | null;
+  /**
+   * When given (the live webhook always gives them), only a FULL payment of
+   * the agreed price can confirm a booking.
+   */
+  paymentType?: string | null;
+  agreedPricePence?: number | null;
 }
 
 export interface StripePaymentReport {
@@ -89,6 +96,14 @@ export function decideDepositOutcome(enquiry: EnquiryPaymentState | null, paymen
   if (enquiry.stripePaymentIntentId === payment.paymentIntentId) return { action: "already_recorded" };
   if (enquiry.depositPaidAt) return { action: "refund_duplicate", reason: "A deposit had already been paid for this booking" };
   if (payment.currency.toLowerCase() !== "gbp") return { action: "needs_review", reason: `Unexpected currency ${payment.currency}` };
+  if (enquiry.paymentType !== undefined) {
+    if (enquiry.paymentType !== "full") {
+      return { action: "needs_review", reason: `Only full payment of the agreed price is accepted (this request was "${enquiry.paymentType ?? "unknown"}")` };
+    }
+    if (enquiry.agreedPricePence == null || enquiry.depositPence !== enquiry.agreedPricePence) {
+      return { action: "needs_review", reason: `Amount requested (${enquiry.depositPence ?? "none"}p) is not 100% of the agreed price (${enquiry.agreedPricePence ?? "none"}p)` };
+    }
+  }
   if (enquiry.depositPence === null || payment.amountPence !== enquiry.depositPence) {
     return { action: "needs_review", reason: `Amount paid (${payment.amountPence}p) does not match the amount due (${enquiry.depositPence ?? "none"}p)` };
   }

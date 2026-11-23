@@ -29,6 +29,12 @@ export async function POST(request: Request, ctx: RouteContext<"/api/pay/[token]
   if (booking.depositPaidAt) return NextResponse.redirect(`${SITE.url}/pay/${token}/success`, 303);
   if (booking.status !== "deposit_requested") return back(token);
 
+  // Only ever charge 100% of the agreed price (never the estimate or a part-payment)
+  if (booking.paymentType !== "full" || booking.depositPence !== booking.agreedPricePence || booking.agreedPricePence <= 0) {
+    console.error(`Refusing checkout for ${booking.reference}: amount is not 100% of the agreed price`);
+    return back(token, "?error=amount");
+  }
+
   // The customer must confirm they've read the cancellation and refund policy
   const form = await request.formData().catch(() => null);
   if (form?.get("acceptTerms") !== "on") return back(token, "?error=terms");
