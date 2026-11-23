@@ -11,6 +11,7 @@ import { customerDetailsSchema, generateReference, isUuid, normalisePostcode } f
 import { sendNotification } from "@/lib/notifications";
 import { calculateQuote, formatPence } from "@/lib/pricing/engine";
 import { LIMITS, quoteItemsSchema } from "@/lib/pricing/schema";
+import { buildQuoteRoomRows } from "@/lib/quote-rooms";
 import { getPricingSettingsUncached } from "@/lib/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { SITE } from "@/config/site";
@@ -123,6 +124,15 @@ export async function POST(request: Request) {
   }
   if (!enquiryId) {
     return NextResponse.json({ error: "We couldn't save your enquiry. Please try again." }, { status: 500 });
+  }
+
+  // One row per room with its measurements and estimated labour price.
+  // If this fails, remove the half-saved enquiry so the records always match.
+  const { error: roomsError } = await supabase.from("quote_rooms").insert(buildQuoteRoomRows(enquiryId, items, quote));
+  if (roomsError) {
+    console.error("Room records insert failed", roomsError);
+    await supabase.from("enquiries").delete().eq("id", enquiryId);
+    return NextResponse.json({ error: "We couldn't save your enquiry. Please try again or contact us directly." }, { status: 500 });
   }
 
   if (photos.length > 0) {
