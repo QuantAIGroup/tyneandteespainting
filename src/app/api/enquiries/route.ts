@@ -16,6 +16,9 @@ import { getPricingSettingsUncached } from "@/lib/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { SITE } from "@/config/site";
 
+/** Largest estimate for a single room or extra (£1,000,000) – the database limit. */
+const MAX_LINE_PENCE = 100_000_000;
+
 const bodySchema = z.object({
   draftId: z.string().refine(isUuid),
   items: quoteItemsSchema,
@@ -87,6 +90,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Something went wrong. Please try again in a moment." }, { status: 500 });
   }
   const quote = calculateQuote(items, pricing);
+  // The database stores up to £1,000,000 per room or extra – anything bigger needs a conversation, not an online form
+  const perItem = new Map<string, number>();
+  for (const l of quote.lines) perItem.set(l.itemId, (perItem.get(l.itemId) ?? 0) + (l.amountPence ?? 0));
+  if ([...perItem.values()].some((pence) => pence > MAX_LINE_PENCE)) {
+    return NextResponse.json({ error: "That's a very large job – please call us so we can quote it properly." }, { status: 400 });
+  }
 
   // Insert, retrying in the very unlikely event of a duplicate reference
   let reference = "";

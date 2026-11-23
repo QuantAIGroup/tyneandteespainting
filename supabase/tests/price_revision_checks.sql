@@ -43,8 +43,14 @@ select case when value->'skirting'->>'ratePerMetre' = '6.25'
   else 'FAIL  re-run overwrote an admin price: ' || (value->'skirting')::text end from public.settings where key = 'pricing';
 
 -- ---------------------------------------------------------------- rules exist once, exactly as written
-select case when count(*) = 5 then 'PASS  each new rule exists exactly once after two runs' else 'FAIL  rule count ' || count(*) end
-from pg_constraint where conname in ('enquiries_full_payment_only', 'enquiries_full_payment_amount', 'enquiries_paid_in_full', 'quote_rooms_item_type_check', 'quote_rooms_extra_shape_check');
+select case when count(*) = 7 then 'PASS  each of the 7 rules exists exactly once after two runs' else 'FAIL  rule count ' || count(*) end
+from pg_constraint where conname in ('enquiries_full_payment_only', 'enquiries_full_payment_amount', 'enquiries_paid_in_full', 'enquiries_payment_needs_consent', 'enquiries_early_start_needs_terms', 'quote_rooms_item_type_check', 'quote_rooms_extra_shape_check');
+select case when count(*) = 1 then 'PASS  paid-booking delete protection trigger exists once' else 'FAIL  delete trigger count ' || count(*) end
+from pg_trigger where tgrelid = 'public.enquiries'::regclass and tgname = 'enquiries_prevent_paid_delete';
+select case when not p.prosecdef and pg_get_userbyid(p.proowner) = 'postgres' and p.proconfig = array['search_path=""'] and p.proacl::text = '{postgres=X/postgres}'
+  then 'PASS  prevent_paid_enquiry_delete: SECURITY INVOKER, owner postgres, search_path "", owner-only execute'
+  else 'FAIL  delete function properties' end
+from pg_proc p where p.oid = 'public.prevent_paid_enquiry_delete()'::regprocedure;
 
 -- ---------------------------------------------------------------- security preserved
 select case when not p.prosecdef and pg_get_userbyid(p.proowner) = 'postgres' and p.proconfig = array['search_path=""'] and p.proacl::text = '{postgres=X/postgres}'
@@ -83,6 +89,18 @@ select pg_temp.expect_reject('inspection extra with NULL quantity', $q$insert in
 select pg_temp.expect_reject('measured room carrying extra fields', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition, extra_kind, quantity) values ('11111111-1111-4111-a111-111111111111', 34, 'bedroom', 'X', 2, '{}', 'door_frame', 1)$q$);
 select pg_temp.expect_reject('measured room with NULL coats', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, condition) values ('11111111-1111-4111-a111-111111111111', 35, 'bedroom', 'X', '{}')$q$);
 select pg_temp.expect_reject('measured room with NULL condition', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats) values ('11111111-1111-4111-a111-111111111111', 36, 'bedroom', 'X', 2)$q$);
+select pg_temp.expect_reject('fixed extra with coats', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, unit_price_pence, estimated_labour_pence, coats) values ('11111111-1111-4111-a111-111111111111', 40, 'extra', 'X', 'door_frame', 1, 3000, 3000, 2)$q$);
+select pg_temp.expect_reject('fixed extra with a condition', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, unit_price_pence, estimated_labour_pence, condition) values ('11111111-1111-4111-a111-111111111111', 41, 'extra', 'X', 'door_frame', 1, 3000, 3000, '{}')$q$);
+select pg_temp.expect_reject('inspection extra with coats and condition', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, requires_manual_quote, coats, condition) values ('11111111-1111-4111-a111-111111111111', 42, 'extra', 'X', 'sash_window', 1, true, 2, '{}')$q$);
+select pg_temp.expect_reject('fixed extra with room measurements', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, unit_price_pence, estimated_labour_pence, length_m, width_m) values ('11111111-1111-4111-a111-111111111111', 43, 'extra', 'X', 'door_frame', 1, 3000, 3000, 4, 3)$q$);
+select pg_temp.expect_reject('inspection extra with a wall area', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, requires_manual_quote, wall_area_sqm) values ('11111111-1111-4111-a111-111111111111', 44, 'extra', 'X', 'sash_window', 1, true, 20)$q$);
+select pg_temp.expect_reject('extra with include_ceiling', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, unit_price_pence, estimated_labour_pence, include_ceiling) values ('11111111-1111-4111-a111-111111111111', 45, 'extra', 'X', 'door_frame', 1, 3000, 3000, true)$q$);
+select pg_temp.expect_reject('measured room with a unit price', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition, unit_price_pence) values ('11111111-1111-4111-a111-111111111111', 46, 'ceiling', 'X', 2, '{}', 600)$q$);
+select pg_temp.expect_reject('measured room with coats out of range', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition) values ('11111111-1111-4111-a111-111111111111', 47, 'bedroom', 'X', 9, '{}')$q$);
+select pg_temp.expect_reject('unit price over £10,000', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, unit_price_pence, estimated_labour_pence) values ('11111111-1111-4111-a111-111111111111', 48, 'extra', 'X', 'door_frame', 1, 1000001, 1000001)$q$);
+select pg_temp.expect_ok('largest allowed extra: 50 × £10,000 = £500,000 (BIGINT maths)', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, unit_price_pence, estimated_labour_pence) values ('11111111-1111-4111-a111-111111111111', 49, 'extra', 'X', 'door_frame', 50, 1000000, 50000000)$q$);
+select pg_temp.expect_reject('a total that would overflow a normal integer', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, unit_price_pence, estimated_labour_pence) values ('11111111-1111-4111-a111-111111111111', 50, 'extra', 'X', 'door_frame', 50, 2147483647, 2147483647)$q$);
+select pg_temp.expect_reject('room estimate over £1,000,000', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition, estimated_labour_pence) values ('11111111-1111-4111-a111-111111111111', 51, 'bedroom', 'X', 2, '{}', 100000001)$q$);
 select pg_temp.expect_reject('NULL item type', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition) values ('11111111-1111-4111-a111-111111111111', 37, null, 'X', 2, '{}')$q$);
 
 -- ---------------------------------------------------------------- payments: only exactly 100%
@@ -94,10 +112,33 @@ select pg_temp.expect_reject('agreed price with NULL payment amount', $q$update 
 select pg_temp.expect_reject('payment amount without an agreed price', $q$update public.enquiries set agreed_price_pence = null, deposit_pence = 40000 where reference = 'PRE-2'$q$);
 select pg_temp.expect_reject('NULL payment type', $q$update public.enquiries set payment_type = null where reference = 'PRE-2'$q$);
 select pg_temp.expect_reject('full payment with a deposit percentage set (even 100%)', $q$update public.enquiries set agreed_price_pence = 37550, deposit_pence = 37550, payment_type = 'full', deposit_percent = 100 where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('agreed price over £50,000', $q$update public.enquiries set agreed_price_pence = 5000001, deposit_pence = 5000001 where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('payment recorded without the cancellation policy confirmed', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi_noconsent', status = 'booking_confirmed', payment_token = 'tok_1' where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('early-start request without the cancellation policy confirmed', $q$update public.enquiries set early_start_requested_at = now() where reference = 'PRE-1'$q$);
+select pg_temp.expect_ok('website server records the cancellation confirmation only (no early start)', $q$update public.enquiries set cancellation_terms_accepted_at = now() where reference = 'PRE-1'$q$);
+select case when early_start_requested_at is null then 'PASS  accepting the terms did not set an early-start request' else 'FAIL  early start set automatically' end from public.enquiries where reference = 'PRE-1';
 select pg_temp.expect_reject('paid amount different from the agreed price', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 18775, stripe_payment_intent_id = 'pi_half', status = 'booking_confirmed' where reference = 'PRE-1'$q$);
 select pg_temp.expect_reject('paid date with NULL paid amount', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = null, stripe_payment_intent_id = 'pi_null', status = 'booking_confirmed' where reference = 'PRE-1'$q$);
 select pg_temp.expect_ok('payment of exactly the agreed price confirms the booking', $q$update public.enquiries set deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi_full', status = 'booking_confirmed', payment_token = 'tok_1' where reference = 'PRE-1'$q$);
 select pg_temp.expect_reject('a second payment recorded on a paid booking', $q$update public.enquiries set deposit_paid_at = now(), stripe_payment_intent_id = 'pi_second' where reference = 'PRE-1'$q$);
+-- After payment the record is locked even for the website server
+select pg_temp.expect_reject('server changing the paid amount', $q$update public.enquiries set deposit_paid_pence = 1 where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('server changing the agreed price after payment', $q$update public.enquiries set agreed_price_pence = 40000, deposit_pence = 40000, deposit_paid_pence = 40000 where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('server changing the Stripe payment reference', $q$update public.enquiries set stripe_payment_intent_id = 'pi_other' where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('server changing the Stripe checkout reference', $q$update public.enquiries set stripe_checkout_session_id = 'cs_other' where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('server changing the payment link token', $q$update public.enquiries set payment_token = null where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('server changing the cancellation confirmation after payment', $q$update public.enquiries set cancellation_terms_accepted_at = now() + interval '1 day' where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('server setting an early-start request after payment', $q$update public.enquiries set early_start_requested_at = now() where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('paid booking moved back to "payment requested"', $q$update public.enquiries set status = 'deposit_requested' where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('paid booking moved back to "price agreed"', $q$update public.enquiries set status = 'price_agreed' where reference = 'PRE-1'$q$);
+select pg_temp.expect_ok('Stripe receipt link filled in once (was empty)', $q$update public.enquiries set stripe_receipt_url = 'https://pay.stripe.com/receipts/r1', stripe_customer_id = 'cus_1' where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('Stripe receipt link changed once set', $q$update public.enquiries set stripe_receipt_url = 'https://evil.example' where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('Stripe customer changed once set', $q$update public.enquiries set stripe_customer_id = 'cus_2' where reference = 'PRE-1'$q$);
+select pg_temp.expect_ok('paid booking moved forward to work completed', $q$update public.enquiries set status = 'work_completed' where reference = 'PRE-1'$q$);
+select pg_temp.expect_ok('paid booking cancelled (refund made in Stripe)', $q$update public.enquiries set status = 'cancelled' where reference = 'PRE-1'$q$);
+select pg_temp.expect_ok('admin can add notes to a paid booking', $q$update public.enquiries set admin_notes = 'Refunded in Stripe 24 Nov' where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
+select pg_temp.expect_reject('admin deleting a paid booking', $q$delete from public.enquiries where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
+select pg_temp.expect_reject('server deleting a paid booking', $q$delete from public.enquiries where reference = 'PRE-1'$q$);
 select pg_temp.expect_ok('payment log entry', $q$insert into public.payments (enquiry_id, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind) values ('11111111-1111-4111-a111-111111111111', 'deposit_recorded', 37550, 'gbp', 'cs_1', 'pi_full', 'evt_1', 'full')$q$);
 select pg_temp.expect_reject('the same Stripe payment logged twice', $q$insert into public.payments (enquiry_id, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind) values ('11111111-1111-4111-a111-111111111111', 'deposit_recorded', 37550, 'gbp', 'cs_1', 'pi_full', 'evt_2', 'full')$q$);
 select pg_temp.expect_reject('the same Stripe payment on a second booking', $q$update public.enquiries set stripe_payment_intent_id = 'pi_full' where reference = 'PRE-2'$q$);
@@ -109,3 +150,4 @@ select pg_temp.expect_ok('admin can still add notes (triggers run normally)', $q
 select pg_temp.expect_reject('admin login changing the cancellation confirmation', $q$update public.enquiries set early_start_requested_at = now() where reference = 'PRE-2'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
 select pg_temp.expect_reject('admin login changing an agreed price', $q$update public.enquiries set agreed_price_pence = 1 where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
 select pg_temp.expect_ok('website server recording the cancellation confirmation', $q$update public.enquiries set cancellation_terms_accepted_at = now() where reference = 'PRE-2'$q$);
+select pg_temp.expect_ok('admin can still delete an unpaid enquiry', $q$delete from public.enquiries where reference = 'PRE-2'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');

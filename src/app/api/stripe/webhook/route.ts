@@ -109,7 +109,7 @@ async function handlePaidSession(
     ? await supabase
         .from("enquiries")
         .select(
-          "id, reference, status, full_name, email, agreed_service, agreed_price_pence, deposit_pence, payment_type, deposit_percent, deposit_paid_at, stripe_payment_intent_id, payment_token",
+          "id, reference, status, full_name, email, agreed_service, agreed_price_pence, deposit_pence, payment_type, deposit_percent, deposit_paid_at, stripe_payment_intent_id, payment_token, cancellation_terms_accepted_at",
         )
         .eq("id", enquiryId)
         .maybeSingle()
@@ -128,6 +128,8 @@ async function handlePaidSession(
           // Only a full payment of the agreed price confirms a booking
           paymentType: (enquiry.payment_type as string | null) ?? null,
           agreedPricePence: enquiry.agreed_price_pence as number | null,
+          // A booking can only be confirmed if the cancellation policy was confirmed first
+          termsAcceptedAt: (enquiry.cancellation_terms_accepted_at as string | null) ?? null,
         }
       : null,
     { amountPence, currency, paymentIntentId },

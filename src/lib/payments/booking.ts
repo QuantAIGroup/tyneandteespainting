@@ -73,6 +73,8 @@ export interface EnquiryPaymentState {
    */
   paymentType?: string | null;
   agreedPricePence?: number | null;
+  /** When given (the live webhook always gives it), a payment can only confirm a booking if the cancellation policy was confirmed. */
+  termsAcceptedAt?: string | null;
 }
 
 export interface StripePaymentReport {
@@ -96,6 +98,9 @@ export function decideDepositOutcome(enquiry: EnquiryPaymentState | null, paymen
   if (enquiry.stripePaymentIntentId === payment.paymentIntentId) return { action: "already_recorded" };
   if (enquiry.depositPaidAt) return { action: "refund_duplicate", reason: "A deposit had already been paid for this booking" };
   if (payment.currency.toLowerCase() !== "gbp") return { action: "needs_review", reason: `Unexpected currency ${payment.currency}` };
+  if (enquiry.termsAcceptedAt === null) {
+    return { action: "needs_review", reason: "The customer's confirmation of the cancellation policy was not recorded before payment" };
+  }
   if (enquiry.paymentType !== undefined) {
     if (enquiry.paymentType !== "full") {
       return { action: "needs_review", reason: `Only full payment of the agreed price is accepted (this request was "${enquiry.paymentType ?? "unknown"}")` };

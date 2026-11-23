@@ -7,6 +7,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_PRICING } from "./defaults";
 import { EXTRA_QUANTITY, FIXED_EXTRAS, INSPECTION_EXTRAS } from "./extras";
+import { MAX_EXTRA_PRICE } from "./schema";
 
 const sql = readFileSync(path.resolve(__dirname, "../../../supabase/migrations/20261123170000_price_revision_full_payment.sql"), "utf8");
 const shapeRule = /room_shape_rule constant text :=\s*\$r\$([\s\S]*?)\$r\$;/.exec(sql)![1];
@@ -18,10 +19,11 @@ describe("migration and website agree", () => {
     const fixed = /extra_kind in \(('door_frame'[^)]*)\)/.exec(shapeRule)![1];
     expect(list(fixed)).toEqual([...FIXED_EXTRAS]);
     const branch = shapeRule.slice(shapeRule.indexOf("'door_frame'"), shapeRule.indexOf("'sash_window'"));
-    expect(branch).toContain("unit_price_pence is not null and unit_price_pence >= 0");
+    expect(branch).toContain(`unit_price_pence is not null and unit_price_pence between 0 and ${MAX_EXTRA_PRICE * 100}`);
     expect(branch).toContain("estimated_labour_pence is not null");
-    expect(branch).toContain("estimated_labour_pence = quantity * unit_price_pence");
+    expect(branch).toContain("estimated_labour_pence::bigint = quantity::bigint * unit_price_pence::bigint");
     expect(branch).toContain("requires_manual_quote is false");
+    expect(branch).toContain("coats is null and condition is null");
   });
 
   it("inspection extras: same kinds, no price, manual quote required", () => {
@@ -31,6 +33,7 @@ describe("migration and website agree", () => {
     expect(branch).toContain("unit_price_pence is null");
     expect(branch).toContain("estimated_labour_pence is null");
     expect(branch).toContain("requires_manual_quote is true");
+    expect(branch).toContain("coats is null and condition is null");
   });
 
   it("use the same quantity limits", () => {
@@ -50,7 +53,11 @@ describe("migration and website agree", () => {
   });
 
   it("never writes bedroom, living room or coats prices", () => {
-    const step1 = sql.slice(sql.indexOf("-- 1. PRICES"), sql.indexOf("-- 2. PAYMENTS"));
+    const start = sql.indexOf("-- 1. PRICES");
+    const end = sql.indexOf("-- 2. NEW COLUMNS");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const step1 = sql.slice(start, end);
     expect(step1).not.toMatch(/'bedroom'|'livingRoom'|'standardCoats'/);
   });
 

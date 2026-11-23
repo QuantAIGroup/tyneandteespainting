@@ -90,7 +90,7 @@ expect_stop mig_e "pricing settings record is missing" "pricing record missing"
 fresh mig_f; $P -d mig_f -c "update public.settings set value = value - 'bedroom' where key = 'pricing'" >/dev/null
 expect_stop mig_f "bedroom price" "bedroom price missing"
 fresh mig_g; $P -d mig_g -c "update public.settings set value = jsonb_set(value, '{livingRoom,ratePerSqm}', '\"abc\"') where key = 'pricing'" >/dev/null
-expect_stop mig_g "livingRoom price" "living room price not a number"
+expect_stop mig_g "livingRoom ratePerSqm" "living room price not a number"
 fresh mig_h; $P -d mig_h -c "update public.settings set value = value || '{\"extras\": {\"door_frame\": -1}}' where key = 'pricing'" >/dev/null
 expect_stop mig_h "extras prices are invalid" "negative saved extra price"
 fresh mig_i; seed_customers mig_i
@@ -98,9 +98,28 @@ $P -d mig_i -c "select set_config('request.jwt.claims', '{\"role\":\"service_rol
 expect_stop mig_i "payment type other than full" "existing 50% deposit request"
 fresh mig_j; seed_customers mig_j
 $P -d mig_j -c "update public.enquiries set payment_type = 'full' where true" -c "select set_config('request.jwt.claims', '{\"role\":\"service_role\"}', false)" -c "update public.enquiries set consultation_confirmed_at = now(), agreed_price_pence = 40000, deposit_pence = null where reference = 'PRE-1'" >/dev/null
-expect_stop mig_j "not exactly 100% of the agreed price" "agreed price with a missing payment amount (old NULL loophole)"
+expect_stop mig_j "not exactly 100% of a valid agreed price" "agreed price with a missing payment amount (old NULL loophole)"
 fresh mig_k
 $P -d mig_k -c "insert into public.enquiries (reference, full_name, email, phone, postcode, preferred_contact, items, breakdown, pricing_snapshot, estimated_total_pence) values ('OLD-1','A','a@x','0','N','phone','[]','{}','{}',0)" >/dev/null
 expect_stop mig_k "payment type other than full" "older enquiry still on the old 'deposit' default"
+
+fresh mig_l; $P -d mig_l -c "update public.settings set value = jsonb_set(value, '{skirting}', '\"cheap\"') where key = 'pricing'" >/dev/null
+expect_stop mig_l "skirting price is missing or not a valid object" "skirting price is not an object"
+fresh mig_m; $P -d mig_m -c "update public.settings set value = jsonb_set(value, '{ceiling,minimumCharge}', '-5') where key = 'pricing'" >/dev/null
+expect_stop mig_m "ceiling minimumCharge" "negative ceiling minimum"
+fresh mig_n; $P -d mig_n -c "update public.settings set value = jsonb_set(value, '{skirting}', '{\"ratePerMetre\": 5}') where key = 'pricing'" >/dev/null
+expect_stop mig_n "skirting minimumCharge" "skirting minimum missing"
+fresh mig_o; $P -d mig_o -c "update public.settings set value = jsonb_set(value, '{ceiling,colour}', '\"white\"') where key = 'pricing'" >/dev/null
+expect_stop mig_o "unexpected fields" "ceiling object with an unexpected field"
+fresh mig_p; $P -d mig_p -c "update public.settings set value = jsonb_set(value, '{bedroom,ratePerSqm}', '\"5.50\"') where key = 'pricing'" >/dev/null
+expect_stop mig_p "bedroom ratePerSqm" "bedroom rate stored as text"
+fresh mig_q; $P -d mig_q -c "update public.settings set value = value || '{\"extras\": {\"door_frame\": 20000}}' where key = 'pricing'" >/dev/null
+expect_stop mig_q "extras prices are invalid" "extra price over £10,000"
+
+echo "== 6. A paid booking from before the migration with no recorded consent"
+fresh mig_r; seed_customers mig_r
+$P -d mig_r -c "select set_config('request.jwt.claims', '{\"role\":\"service_role\"}', false)" -c "update public.enquiries set consultation_confirmed_at = now(), agreed_price_pence = 37550, deposit_pence = 37550, payment_token = 't', status = 'booking_confirmed', deposit_paid_at = now(), deposit_paid_pence = 37550, stripe_payment_intent_id = 'pi_old' where reference = 'PRE-1'" >/dev/null
+expect_stop mig_r "no recorded cancellation-policy confirmation" "paid booking without consent"
+[ "$(q mig_r "select count(*) from information_schema.columns where table_name='enquiries' and column_name='cancellation_terms_accepted_at'")" = 0 ] && pass "the new columns added before that check were rolled back too"
 
 echo "== All migration checks passed"

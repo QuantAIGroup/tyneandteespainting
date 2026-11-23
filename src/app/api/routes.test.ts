@@ -97,6 +97,16 @@ describe("quote request submission", () => {
     expect(db.table("enquiries")).toHaveLength(0);
   });
 
+  it("asks very large jobs to call instead of failing to save", async () => {
+    const huge = { ...items[0], length: 1000, width: 1000, height: 20, includeCeiling: false }; // 80,000 m² of wall
+    const res = await submitEnquiry(json({ draftId, items: [huge], customer, photos: [] }));
+    // 80,000 m² × £5.50 = £440,000 – still under the £1,000,000 per-room limit, so it saves
+    expect(res.status).toBe(200);
+    db.tables = {};
+    const res2 = await submitEnquiry(json({ draftId, items: [huge, { ...huge, id: "r2" }], customer, photos: [] }));
+    expect(res2.status).toBe(200); // the limit is per room, not per enquiry
+  });
+
   it("rejects invalid measurements and quantities", async () => {
     expect((await submitEnquiry(json({ draftId, items: [{ ...items[1], linearMetres: 0 }], customer, photos: [] }))).status).toBe(400);
     expect((await submitEnquiry(json({ draftId, items: [{ ...items[2], quantity: 0 }], customer, photos: [] }))).status).toBe(400);
@@ -164,6 +174,7 @@ describe("Stripe webhook – 100% payments", () => {
       deposit_paid_at: null,
       stripe_payment_intent_id: null,
       payment_token: "tok",
+      cancellation_terms_accepted_at: "2026-11-23T12:00:00Z",
     });
   });
 
@@ -246,7 +257,7 @@ describe("Stripe webhook – part-payments can never confirm a booking", () => {
     return stripeWebhook(new Request("http://localhost/api/stripe/webhook", { method: "POST", headers: { "stripe-signature": signature }, body }));
   };
   const seed = (o: Record<string, unknown>) =>
-    db.table("enquiries").push({ id: enquiryId, reference: "TT-PART", status: "deposit_requested", full_name: "Pat", email: "p@example.com", agreed_price_pence: 37550, deposit_pence: 37550, payment_type: "full", deposit_paid_at: null, stripe_payment_intent_id: null, ...o });
+    db.table("enquiries").push({ id: enquiryId, reference: "TT-PART", status: "deposit_requested", full_name: "Pat", email: "p@example.com", agreed_price_pence: 37550, deposit_pence: 37550, payment_type: "full", deposit_paid_at: null, stripe_payment_intent_id: null, cancellation_terms_accepted_at: "2026-11-23T12:00:00Z", ...o });
 
   it("refuses a half payment even if the stored request was altered to half", async () => {
     seed({ deposit_pence: 18775 }); // tampered: 50% stored as if it were "full"
@@ -260,6 +271,13 @@ describe("Stripe webhook – part-payments can never confirm a booking", () => {
     await send(18775);
     expect(db.table("enquiries")[0].deposit_paid_at).toBeNull();
     expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review", notes: expect.stringContaining("Only full payment") });
+  });
+
+  it("refuses to confirm a booking if the cancellation policy confirmation wasn't recorded", async () => {
+    seed({ cancellation_terms_accepted_at: null });
+    await send(37550);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "deposit_requested", deposit_paid_at: null });
+    expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review", notes: expect.stringContaining("cancellation policy") });
   });
 
   it("refuses an overpayment", async () => {
@@ -308,6 +326,14 @@ describe("Stripe checkout – charges exactly 100% of the agreed price", () => {
     seed();
     await pay({ acceptTerms: "on", amount: "1", deposit_pence: "1", unit_amount: "1" });
     expect((create.mock.calls[0][0] as { line_items: { price_data: { unit_amount: number } }[] }).line_items[0].price_data.unit_amount).toBe(37550);
+  });
+
+  it("accepting the terms is NOT treated as a request to start early", async () => {
+    seed();
+    await pay({ acceptTerms: "on" });
+    const e = db.table("enquiries")[0];
+    expect(e.cancellation_terms_accepted_at).toBeTruthy();
+    expect(e.early_start_requested_at).toBeNull();
   });
 
   it("records an early-start request when ticked", async () => {

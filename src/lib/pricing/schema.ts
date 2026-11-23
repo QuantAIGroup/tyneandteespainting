@@ -153,18 +153,22 @@ export const quoteItemsSchema = z
   .max(LIMITS.maxItems, `You can add up to ${LIMITS.maxItems} items to one quotation`);
 
 const money = z.number().finite().min(0).max(100000);
+/** Largest price for one extra item, in pounds (the database allows up to 1,000,000 pence). */
+export const MAX_EXTRA_PRICE = 10000;
+const extraPrice = z.number().finite().min(0).max(MAX_EXTRA_PRICE);
 export const pricingSettingsSchema = z.object({
   bedroom: z.object({ ratePerSqm: money, minimumCharge: money }),
   livingRoom: z.object({ ratePerSqm: money, minimumCharge: money }),
   skirting: z.object({ ratePerMetre: money, minimumCharge: money }),
   ceiling: z.object({ ratePerSqm: money, minimumCharge: money }),
+  // Matches the database limit: up to £10,000 per item
   extras: z.object({
-    door_frame: money,
-    window_frame: money,
-    radiator_standard: money,
-    radiator_large: money,
-    feature_wall: money,
-    interior_door: money,
+    door_frame: extraPrice,
+    window_frame: extraPrice,
+    radiator_standard: extraPrice,
+    radiator_large: extraPrice,
+    feature_wall: extraPrice,
+    interior_door: extraPrice,
   }),
   roundToNearest: z.number().finite().min(0).max(100),
   standardCoats: z.number().int().min(1).max(5),

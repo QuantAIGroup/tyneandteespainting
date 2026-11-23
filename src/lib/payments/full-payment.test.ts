@@ -64,6 +64,11 @@ describe("payment status after a verified Stripe payment", () => {
     expect(decideDepositOutcome(paid, pay(37550, { paymentIntentId: "pi_2" })).action).toBe("refund_duplicate");
   });
 
+  it("needs the cancellation policy to have been confirmed (when the webhook supplies it)", () => {
+    expect(decideDepositOutcome({ ...booking, termsAcceptedAt: null }, pay(37550)).action).toBe("needs_review");
+    expect(decideDepositOutcome({ ...booking, termsAcceptedAt: "2026-11-23T12:00:00Z", paymentType: "full", agreedPricePence: 37550 }, pay(37550)).action).toBe("mark_paid");
+  });
+
   it("flags wrong currency and payments for withdrawn requests", () => {
     expect(decideDepositOutcome(booking, pay(37550, { currency: "eur" })).action).toBe("needs_review");
     expect(decideDepositOutcome({ ...booking, status: "price_agreed" }, pay(37550)).action).toBe("needs_review");
