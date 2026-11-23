@@ -89,6 +89,9 @@ export default async function EnquiryPage({ params }: PageProps<"/admin/enquirie
       <div className="mt-4 flex flex-wrap items-center gap-4">
         <h1 className="font-mono text-3xl">{enquiry.reference as string}</h1>
         <StatusBadge status={enquiry.status as string} />
+        <Link href={`/admin/jobs/new?enquiry=${id}`} className="ml-auto rounded-full bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700">
+          Create painter job
+        </Link>
       </div>
       <p className="mt-1 text-ink-600">Received {created}</p>
 

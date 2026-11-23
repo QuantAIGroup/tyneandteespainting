@@ -45,6 +45,21 @@ export async function sendCustomerEmail(
   return sendEmail([to], subject, lines, button, replyTo);
 }
 
+/** Email a PAINTER – job offers, onboarding decisions, sign-in links. Replies go to your NOTIFICATION_EMAIL_TO address. */
+export async function sendPainterEmail(
+  to: string,
+  subject: string,
+  lines: string[],
+  button?: { label: string; url: string },
+): Promise<{ sent: boolean; reason?: string }> {
+  if (!isEmailConfigured()) {
+    console.info(`[notifications] Email not configured – painter email skipped: ${subject}`);
+    return { sent: false, reason: "not_configured" };
+  }
+  const replyTo = process.env.NOTIFICATION_EMAIL_TO!.split(",")[0].trim();
+  return sendEmail([to], subject, lines, button, replyTo);
+}
+
 async function sendEmail(
   to: string[],
   subject: string,

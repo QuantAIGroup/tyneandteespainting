@@ -1,0 +1,10 @@
+{
+  "name": "Tyne & Tees Painting – Painter portal",
+  "short_name": "T&T Painters",
+  "start_url": "/painter",
+  "scope": "/painter",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0012DA",
+  "icons": [{ "src": "/brand-logo.png", "sizes": "any", "type": "image/png", "purpose": "any" }]
+}

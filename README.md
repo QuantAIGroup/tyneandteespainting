@@ -25,7 +25,8 @@ Royal blue `#0012DA` (buttons, links, accents) · Black `#000000` (headings and 
 | **Admin** (`/admin`) | Enquiries (filter by status, view measurements, photos, breakdown, mark contacted / quote accepted / job completed, private notes), contact messages, **edit every price and minimum charge**, edit business details, upload gallery photos |
 | **SEO** | Page titles/descriptions, `HousePainter` (LocalBusiness) structured data, sitemap.xml, robots.txt, alt text, service-area page |
 | **Online payments** | After you approve the quotation, send a secure payment link for a **deposit (default 50%, editable)**, **full payment** or **a custom amount**. Customer pays by card, Apple Pay or Google Pay via Stripe. Only marked paid after a verified Stripe webhook |
-| **Tests** | 67 unit tests for pricing, payments, booking rules, Stripe webhook signatures and validation |
+| **Painter platform** | Independent painter portal (`/painter`), jobs, offers/counteroffers, onboarding, CIS ledger, legal document centre, approval gates – see below |
+| **Tests** | 99 unit tests + 46 database rule tests |
 
 ### How prices are calculated
 
@@ -42,6 +43,43 @@ Royal blue `#0012DA` (buttons, links, accents) · Black `#000000` (headings and 
 Major damage, wallpaper removal and damp/staining give a **manual quotation** for that item instead of a guessed price. Extra coats, new plaster, big colour changes and bare-wood skirting are **flagged for review** while still showing the standard price. Materials are never included and there are no hourly rates anywhere.
 
 The browser shows the price instantly, but the **server recalculates it** with the current prices when the enquiry is saved, so nobody can tamper with it.
+
+---
+
+## Painter platform (independent painters, jobs, CIS) – NEW
+
+The same website now has two internal areas:
+
+- **`/painter`** – the **independent painter portal** (optimised for iPhone; painters can "Add to Home Screen"). Painters register at **`/painter/apply`**, set a password from the email link, complete their business profile, upload insurance, and then receive job offers they can **accept, decline or counteroffer**.
+- **`/admin`** – your dashboard gains **Jobs, Painters, Payments & CIS, Legal documents and Approvals**.
+
+Customers are unaffected: they still enquire and pay on the website through Stripe. There is no customer portal.
+
+### How a job flows
+1. A customer enquires and pays on the website (as now).
+2. On the enquiry page click **Create painter job**. Add the site address (hidden from painters until a job is agreed).
+3. On the job page, **offer it** to an approved painter with the fee, date, arrival window, materials, exclusions and payment terms.
+4. The painter accepts, declines or counteroffers. You accept or counter back. **The job is agreed only when both sides accept the same version** – every version is kept permanently.
+5. The painter sees the address, uploads before/after photos, reports any emergency, and submits completion. You review it.
+6. Invoices, painter payments by bank transfer and CIS are the next build phase (the database rules are already in place).
+
+### Set-up steps (once)
+1. **Supabase → SQL Editor**: run these three files from `supabase/migrations/`, in order:
+   `20261124000000_painter_platform_operations.sql`, `20261124000100_painter_platform_finance.sql`, `20261124000200_legal_document_register.sql`.
+   (The two `20261123…` files are already in your live database – they were added to GitHub so the code matches it. Don't run them again.)
+   They only ADD things. To undo, see `supabase/rollback/20261124_painter_platform_rollback.sql` (⚠️ deletes painter data).
+2. **Vercel → Environment Variables**: add `PAINTER_DATA_ENCRYPTION_KEY` (see `.env.example`) and make sure the Resend email settings are set – painter registration and password emails need them.
+3. Keep **"Allow new users to sign up" OFF** in Supabase. Painter accounts are created by the server, not by public sign-up.
+4. Your existing admin login automatically has the **Owner** role (full access). To give someone a narrower role, add them to `admin_users` with `role` = `operations`, `finance` or `compliance`.
+
+### Locked until your advisers approve (Admin → Approvals)
+Painter payments stay locked until your **accountant** confirms your CIS set-up. Construction Act notices stay locked until a **construction solicitor** approves them. Legal documents can only be accepted by painters after they are marked "Approved for publication" with the approver's name. Nothing in the app deducts money from painters automatically.
+
+More detail: `docs/TECHNICAL-AUDIT.md`, `docs/COMPLIANCE-DESIGN.md`, `docs/legal/RECONCILIATION.md`.
+
+### Tests
+- `npm test` – 99 unit tests (pricing, payments, CIS maths, tax months, offer rules, complaints, reconciliation, permissions, encryption).
+- `npm run test:db` – runs every migration in a throwaway Postgres and checks 46 database rules (mutual acceptance, no editing accepted terms, painters can't see each other's data, CIS calculations, payment locks, document approval, append-only audit log).
 
 ---
 

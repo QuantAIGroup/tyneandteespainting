@@ -3,6 +3,7 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { ExternalLink, LogOut } from "lucide-react";
 import { getAdminUser } from "@/lib/auth";
+import { can, ROLE_LABELS, type Permission } from "@/lib/platform/permissions";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
 import { signOut } from "../actions";
 import { redirect } from "next/navigation";
@@ -10,8 +11,13 @@ import { connection } from "next/server";
 
 export const metadata: Metadata = { title: "Admin", robots: { index: false, follow: false } };
 
-const NAV = [
+const NAV: { href: string; label: string; permission?: Permission }[] = [
   { href: "/admin", label: "Enquiries" },
+  { href: "/admin/jobs", label: "Jobs", permission: "jobs.manage" },
+  { href: "/admin/painters", label: "Painters", permission: "painters.view" },
+  { href: "/admin/finance", label: "Payments & CIS", permission: "finance.view" },
+  { href: "/admin/documents", label: "Legal documents", permission: "documents.view" },
+  { href: "/admin/approvals", label: "Approvals" },
   { href: "/admin/messages", label: "Messages" },
   { href: "/admin/settings", label: "Prices & details" },
   { href: "/admin/gallery", label: "Gallery" },
@@ -47,7 +53,7 @@ async function AdminGate({ children }: { children: React.ReactNode }) {
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-5 py-3">
           <div className="flex flex-wrap items-center gap-1">
             <span className="mr-4 font-bold tracking-tight text-lg">Admin</span>
-            {NAV.map((n) => (
+            {NAV.filter((n) => !n.permission || can(user.role, n.permission)).map((n) => (
               <Link key={n.href} href={n.href} className="rounded-md px-3 py-2 text-sm text-ink-100 hover:bg-white/10 hover:text-white">
                 {n.label}
               </Link>
@@ -57,7 +63,9 @@ async function AdminGate({ children }: { children: React.ReactNode }) {
             <Link href="/" target="_blank" className="flex items-center gap-1 text-ink-100 hover:text-white">
               View website <ExternalLink className="size-3.5" aria-hidden />
             </Link>
-            <span className="hidden text-ink-100/60 sm:inline">{user.email}</span>
+            <span className="hidden text-ink-100/60 sm:inline">
+              {user.email} · {ROLE_LABELS[user.role]}
+            </span>
             <form action={signOut}>
               <button type="submit" className="flex items-center gap-1.5 rounded-md px-3 py-2 text-ink-100 hover:bg-white/10 hover:text-white">
                 <LogOut className="size-4" aria-hidden /> Sign out

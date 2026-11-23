@@ -1,10 +1,14 @@
 /**
- * Runs before every /admin request. It keeps the Supabase login session fresh
- * and sends logged-out visitors to the login page. (The admin pages also check
- * properly on the server – this is just the first line of defence.)
+ * Runs before every /admin and /painter request. It keeps the Supabase login
+ * session fresh and sends logged-out visitors to the right login page. (The
+ * pages also check properly on the server – this is just the first line of
+ * defence.)
  */
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+
+/** Painter pages anyone can open (sign in, apply, password links). */
+const PUBLIC_PAINTER_PATHS = ["/painter/login", "/painter/apply", "/painter/auth", "/painter/forgot-password"];
 
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request });
@@ -30,10 +34,13 @@ export async function proxy(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const isLoginPage = request.nextUrl.pathname.startsWith("/admin/login");
-  if (!user && !isLoginPage) {
+  const path = request.nextUrl.pathname;
+  const isPainterArea = path === "/painter" || path.startsWith("/painter/");
+  const isPublic = isPainterArea ? PUBLIC_PAINTER_PATHS.some((p) => path.startsWith(p)) : path.startsWith("/admin/login");
+
+  if (!user && !isPublic) {
     const loginUrl = request.nextUrl.clone();
-    loginUrl.pathname = "/admin/login";
+    loginUrl.pathname = isPainterArea ? "/painter/login" : "/admin/login";
     loginUrl.search = "";
     return NextResponse.redirect(loginUrl);
   }
@@ -42,5 +49,5 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/admin/:path*"],
+  matcher: ["/admin/:path*", "/painter", "/painter/:path*"],
 };
