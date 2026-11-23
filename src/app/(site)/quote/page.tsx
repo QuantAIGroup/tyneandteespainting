@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { getBusinessSettings, getPaymentSettings, getPricingSettings } from "@/lib/settings";
+import { getBusinessSettings, getPricingSettings } from "@/lib/settings";
 import { QuoteCalculator } from "@/components/calculator/QuoteCalculator";
 import { Container } from "@/components/ui/Container";
 
@@ -17,7 +17,7 @@ function uploadsConfigured() {
 }
 
 export default async function QuotePage() {
-  const [pricing, business, payments] = await Promise.all([getPricingSettings(), getBusinessSettings(), getPaymentSettings()]);
+  const [pricing, business] = await Promise.all([getPricingSettings(), getBusinessSettings()]);
   return (
     <div className="bg-white">
       <Container className="py-12 sm:py-16">
@@ -27,7 +27,7 @@ export default async function QuotePage() {
           <p className="mt-4 text-lg text-ink-700">Room-by-room labour prices worked out from your own measurements. No hourly rates, no hidden labour fees – and no need to wait in for a visit. Online estimates are completely free.</p>
         </div>
         <Suspense fallback={<div className="h-96 animate-pulse rounded-2xl bg-white/60" aria-label="Loading calculator" />}>
-          <QuoteCalculator pricing={pricing} uploadsEnabled={uploadsConfigured()} phone={business.phone} depositPercent={payments.defaultDepositPercent} />
+          <QuoteCalculator pricing={pricing} uploadsEnabled={uploadsConfigured()} phone={business.phone} />
         </Suspense>
       </Container>
     </div>

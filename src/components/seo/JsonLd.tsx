@@ -29,7 +29,7 @@ export function LocalBusinessJsonLd({ business, pricing }: { business: BusinessS
             : s.calculatorItem === "living_room"
               ? pricing.livingRoom.minimumCharge
               : s.calculatorItem === "skirting"
-                ? pricing.skirting.minimumCharge
+                ? pricing.skirting.minimumCharge || pricing.skirting.ratePerMetre
                 : pricing.ceiling.minimumCharge,
       },
     })),

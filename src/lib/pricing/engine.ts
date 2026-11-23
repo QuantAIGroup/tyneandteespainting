@@ -9,15 +9,22 @@
  *  1. Work out the wall area: 2 × (length + width) × height, or the sum of each wall.
  *  2. Multiply by the labour rate for that room type.
  *  3. Apply the minimum charge for that room.
- *  4. Price ceilings and skirting boards as separate lines with their own minimums.
- *  5. Add everything together.
- *  6. Round the final total to the nearest £5 (configurable).
- *  7. Return a clear line-by-line breakdown.
+ *  4. Price ceilings (length × width × rate, with a minimum) and skirting boards
+ *     (linear metres × rate) as separate lines.
+ *  5. Price counted extras: quantity × fixed price (e.g. 3 door frames × £30).
+ *     Extras that need an inspection never get an automatic price.
+ *  6. Add everything together (optional rounding – switched off by default).
+ *  7. Return a clear line-by-line breakdown. Every line has either a price or
+ *     a clear "inspection and separate quotation required" status.
  *
  * Labour only – materials are never included. There are no hourly rates.
  */
+import { EXTRAS, INSPECTION_MESSAGE, describeQuantity, isFixedExtra } from "./extras";
+import { LARGE_AREA } from "./schema";
 import type {
   CeilingItem,
+  ExtraItem,
+  LineCategory,
   PaintedRoomItem,
   PricingSettings,
   QuoteFlag,
@@ -84,6 +91,7 @@ export function priceLine(
 function makeLine(
   item: QuoteItem,
   kind: QuoteLine["kind"],
+  category: LineCategory,
   label: string,
   quantity: number,
   unit: QuoteLine["unit"],
@@ -96,6 +104,7 @@ function makeLine(
     itemId: item.id,
     label,
     kind,
+    category,
     quantity,
     unit,
     ratePence: poundsToPence(ratePounds),
@@ -107,7 +116,7 @@ function makeLine(
   };
 }
 
-function coatsFlag(item: QuoteItem, settings: PricingSettings): QuoteFlag | null {
+function coatsFlag(item: PaintedRoomItem | SkirtingItem | CeilingItem, settings: PricingSettings): QuoteFlag | null {
   if (item.coats > settings.standardCoats) {
     return {
       itemId: item.id,
@@ -140,9 +149,16 @@ export function roomFlags(item: PaintedRoomItem, settings: PricingSettings): Quo
   if (c.colourChange === "significant") {
     flags.push({ ...base, severity: "review", message: "A big colour change can need an extra coat. We'll confirm this with you before any work starts." });
   }
+  if (roomWallArea(item) > LARGE_AREA.walls) {
+    flags.push({ ...base, severity: "review", message: largeAreaMessage(roomWallArea(item), "wall") });
+  }
   const coats = coatsFlag(item, settings);
   if (coats) flags.push(coats);
   return flags;
+}
+
+function largeAreaMessage(area: number, what: "wall" | "ceiling"): string {
+  return `This is a large area (${area.toFixed(2)} m² of ${what}). It's priced at the normal rate per m²; we'll confirm the measurements with you before the price is agreed.`;
 }
 
 export function skirtingFlags(item: SkirtingItem, settings: PricingSettings): QuoteFlag[] {
@@ -171,9 +187,27 @@ export function ceilingFlags(item: CeilingItem, settings: PricingSettings): Quot
   if (item.condition.newlySkimmed) {
     flags.push({ ...base, severity: "review", message: "A newly plastered ceiling needs a mist coat first. We'll confirm whether this changes the price." });
   }
+  const area = ceilingArea(item.length, item.width);
+  if (area > LARGE_AREA.ceiling) flags.push({ ...base, severity: "review", message: largeAreaMessage(area, "ceiling") });
   const coats = coatsFlag(item, settings);
   if (coats) flags.push(coats);
   return flags;
+}
+
+/**
+ * A counted extra: quantity × fixed price, with no minimum charge.
+ * Inspection extras get no price and a "manual" flag instead.
+ */
+export function priceExtra(item: ExtraItem, settings: PricingSettings): { line: QuoteLine; flag: QuoteFlag | null } {
+  const def = EXTRAS[item.extra];
+  const label = `${item.label} (${describeQuantity(item.extra, item.quantity)})`;
+  if (!isFixedExtra(item.extra)) {
+    return {
+      line: makeLine(item, "extra", def.category, label, item.quantity, "each", 0, 0, true),
+      flag: { itemId: item.id, itemLabel: item.label, severity: "manual", message: `${INSPECTION_MESSAGE}. We'll look at your photographs or visit before pricing this.` },
+    };
+  }
+  return { line: makeLine(item, "extra", def.category, label, item.quantity, "each", settings.extras[item.extra], 0, false), flag: null };
 }
 
 /** Calculate a full quotation from a list of rooms/services. */
@@ -186,23 +220,29 @@ export function calculateQuote(items: QuoteItem[], settings: PricingSettings): Q
       const itemFlags = roomFlags(item, settings);
       const manual = itemFlags.some((f) => f.severity === "manual");
       const rates = item.type === "bedroom" ? settings.bedroom : settings.livingRoom;
-      lines.push(makeLine(item, "walls", `${item.label} – walls`, roomWallArea(item), "m²", rates.ratePerSqm, rates.minimumCharge, manual));
+      lines.push(makeLine(item, "walls", "rooms", `${item.label} – walls`, roomWallArea(item), "m²", rates.ratePerSqm, rates.minimumCharge, manual));
       if (item.includeCeiling) {
         lines.push(
-          makeLine(item, "ceiling", `${item.label} – ceiling`, ceilingArea(item.length, item.width), "m²", settings.ceiling.ratePerSqm, settings.ceiling.minimumCharge, manual),
+          makeLine(item, "ceiling", "ceilings", `${item.label} – ceiling`, ceilingArea(item.length, item.width), "m²", settings.ceiling.ratePerSqm, settings.ceiling.minimumCharge, manual),
         );
+        const area = ceilingArea(item.length, item.width);
+        if (area > LARGE_AREA.ceiling) itemFlags.push({ itemId: item.id, itemLabel: item.label, severity: "review", message: largeAreaMessage(area, "ceiling") });
       }
       flags.push(...itemFlags);
     } else if (item.type === "skirting") {
       const itemFlags = skirtingFlags(item, settings);
       const manual = itemFlags.some((f) => f.severity === "manual");
-      lines.push(makeLine(item, "skirting", item.label, round2(item.linearMetres), "m", settings.skirting.ratePerMetre, settings.skirting.minimumCharge, manual));
+      lines.push(makeLine(item, "skirting", "skirting", item.label, round2(item.linearMetres), "m", settings.skirting.ratePerMetre, settings.skirting.minimumCharge, manual));
       flags.push(...itemFlags);
     } else if (item.type === "ceiling") {
       const itemFlags = ceilingFlags(item, settings);
       const manual = itemFlags.some((f) => f.severity === "manual");
-      lines.push(makeLine(item, "ceiling", item.label, ceilingArea(item.length, item.width), "m²", settings.ceiling.ratePerSqm, settings.ceiling.minimumCharge, manual));
+      lines.push(makeLine(item, "ceiling", "ceilings", item.label, ceilingArea(item.length, item.width), "m²", settings.ceiling.ratePerSqm, settings.ceiling.minimumCharge, manual));
       flags.push(...itemFlags);
+    } else if (item.type === "extra") {
+      const { line, flag } = priceExtra(item, settings);
+      lines.push(line);
+      if (flag) flags.push(flag);
     }
   }
 

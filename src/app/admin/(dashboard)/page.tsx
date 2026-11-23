@@ -41,7 +41,7 @@ export default async function EnquiriesPage({ searchParams }: PageProps<"/admin"
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-3xl">Enquiries</h1>
-          <p className="mt-1 text-ink-600">Estimates from the website calculator. Call the customer, agree the final price, then send the 50% deposit link from the enquiry page.</p>
+          <p className="mt-1 text-ink-600">Estimates from the website calculator. Call the customer, agree the final price, then send the payment link for 100% of the agreed price from the enquiry page.</p>
         </div>
       </div>
 
@@ -68,7 +68,7 @@ export default async function EnquiriesPage({ searchParams }: PageProps<"/admin"
               <th scope="col" className="px-4 py-3 font-semibold">Postcode</th>
               <th scope="col" className="px-4 py-3 text-right font-semibold">Online estimate</th>
               <th scope="col" className="px-4 py-3 text-right font-semibold">Agreed price</th>
-              <th scope="col" className="px-4 py-3 text-right font-semibold">Deposit paid</th>
+              <th scope="col" className="px-4 py-3 text-right font-semibold">Paid</th>
               <th scope="col" className="px-4 py-3 font-semibold">Flags</th>
               <th scope="col" className="px-4 py-3 font-semibold">Status</th>
             </tr>

@@ -17,14 +17,18 @@ import { useMemo, useRef, useState, type FormEvent } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, ArrowRight, BedDouble, CheckCircle2, Layers, Loader2, Pencil, PaintRoller, Sofa, Trash2, Square } from "lucide-react";
-import { calculateQuote, formatPence } from "@/lib/pricing/engine";
-import type { PricingSettings } from "@/lib/pricing/types";
+import { calculateQuote } from "@/lib/pricing/engine";
+import { INSPECTION_MESSAGE } from "@/lib/pricing/extras";
+import type { ExtraKind, PricingSettings } from "@/lib/pricing/types";
 import { customerDetailsSchema, type CustomerDetails } from "@/lib/enquiry";
 import { LIMITS } from "@/lib/pricing/schema";
 import { Button, buttonClasses } from "@/components/ui/Button";
 import { Alert, Field, Input, Select, Textarea } from "@/components/ui/Form";
 import { PRICING_RULES } from "@/components/home/PricingPromise";
-import { createItem, validItems, validateDraft, type ItemDraft, type ItemKind, type Unit } from "./draft";
+import { createExtra, createItem, isMeasured, validItems, validateDraft, type ExtraDraft, type ItemDraft, type ItemKind, type Unit } from "./draft";
+import { ExtrasPicker, QuantityStepper } from "./ExtrasPicker";
+import { ItemPrice } from "./ItemPrice";
+import { extraWorking, money, optionPrice } from "./prices";
 import { ItemMeasurements } from "./ItemMeasurements";
 import { ItemCondition } from "./ItemCondition";
 import { RoomSummary } from "./RoomSummary";
@@ -36,10 +40,10 @@ import { CallToDiscuss } from "@/components/CallToDiscuss";
 const STEPS = ["Select your service", "Enter measurements", "Upload photographs", "Your estimate"] as const;
 
 const ADD_OPTIONS: { kind: ItemKind; label: string; note: string; icon: typeof BedDouble }[] = [
-  { kind: "bedroom", label: "Bedroom", note: "Walls, priced per m²", icon: BedDouble },
-  { kind: "living_room", label: "Living room", note: "Walls, priced per m²", icon: Sofa },
-  { kind: "skirting", label: "Skirting boards", note: "Priced per metre", icon: Layers },
-  { kind: "ceiling", label: "Ceiling only", note: "Optional extra – or add it to a room", icon: Square },
+  { kind: "bedroom", label: "Bedroom", note: "Walls – enter the room size", icon: BedDouble },
+  { kind: "living_room", label: "Living room", note: "Walls – enter the room size", icon: Sofa },
+  { kind: "ceiling", label: "Ceiling Painting", note: "Enter the ceiling length and width", icon: Square },
+  { kind: "skirting", label: "Skirting Boards", note: "Enter the total length in metres", icon: Layers },
 ];
 
 type CustomerDraft = {
@@ -57,7 +61,7 @@ const EMPTY_CUSTOMER: CustomerDraft = { fullName: "", email: "", phone: "", post
 
 const VALID_KINDS: ItemKind[] = ["bedroom", "living_room", "skirting", "ceiling"];
 
-export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent }: { pricing: PricingSettings; uploadsEnabled: boolean; phone: string; depositPercent: number }) {
+export function QuoteCalculator({ pricing, uploadsEnabled, phone }: { pricing: PricingSettings; uploadsEnabled: boolean; phone: string }) {
   const searchParams = useSearchParams();
   const [items, setItems] = useState<ItemDraft[]>(() => {
     const add = searchParams.get("add") as ItemKind | null;
@@ -84,6 +88,20 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
   const update = (id: string, patch: Partial<ItemDraft>) => setItems((prev) => prev.map((i) => (i.id === id ? ({ ...i, ...patch } as ItemDraft) : i)));
   const addItem = (kind: ItemKind) => setItems((prev) => [...prev, createItem(kind, prev, pricing.standardCoats)]);
   const removeItem = (id: string) => setItems((prev) => prev.filter((i) => i.id !== id));
+  const addExtra = (kind: ExtraKind) => setItems((prev) => (prev.some((i) => i.type === "extra" && i.extra === kind) ? prev : [...prev, createExtra(kind)]));
+  const changeExtra = (kind: ExtraKind, quantity: number | null) =>
+    setItems((prev) => prev.map((i) => (i.type === "extra" && i.extra === kind ? { ...i, quantity } : i)));
+  const removeExtra = (kind: ExtraKind) => setItems((prev) => prev.filter((i) => !(i.type === "extra" && i.extra === kind)));
+  const measured = items.filter(isMeasured);
+  const extras = items.filter((i): i is ExtraDraft => i.type === "extra");
+  const extraErrors = Object.fromEntries(extras.map((e) => [e.id, Object.values(validations[e.id]?.errors ?? {})[0]]));
+  /** Price for one item in the running total – never blank. */
+  const itemPriceText = (item: ItemDraft): string => {
+    const lines = quote.lines.filter((l) => l.itemId === item.id);
+    if (lines.length === 0) return item.type === "extra" ? "Enter a quantity" : "Enter measurements";
+    if (lines.some((l) => l.status === "manual")) return "Inspection required";
+    return money(lines.reduce((s, l) => s + (l.amountPence ?? 0), 0));
+  };
 
   function goTo(next: number) {
     setStepError(null);
@@ -92,7 +110,8 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
   }
 
   function next() {
-    if (step === 0 && items.length === 0) return setStepError("Add at least one room or service to continue.");
+    if (step === 0 && items.length === 0) return setStepError("Add at least one room, service or extra to continue.");
+    if (step === 0 && extras.some((e) => validations[e.id].item === null)) return setStepError("Please enter a quantity for each extra you've selected.");
     if (step === 1 && !allValid) {
       setShowErrors(true);
       return setStepError("Please check the highlighted measurements.");
@@ -158,14 +177,14 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
         <p className="mt-4 text-lg text-ink-700">Your enquiry reference is</p>
         <p className="mt-2 inline-block rounded-lg bg-grey-50 px-5 py-3 font-mono text-2xl font-semibold tracking-wider text-ink-950 ring-1 ring-grey-200">{reference}</p>
         <div className="mt-8 text-left">
-          <CallToDiscuss phone={phone} depositPercent={depositPercent} compact />
+          <CallToDiscuss phone={phone} compact />
         </div>
         <div className="mt-6 space-y-3 text-left text-[15px] leading-relaxed text-ink-800">
           <p>
             <strong>What happens next:</strong> we&rsquo;ll review your measurements and photographs. Give us a call (or we&rsquo;ll contact you by your preferred method) to talk through the job and agree your final price.
           </p>
           <p>
-            <strong>This is not a booking yet.</strong> Nothing has been charged and you are not committed to anything. A 50% deposit is only requested after we&rsquo;ve spoken and you&rsquo;ve agreed the final price.
+            <strong>This is not a booking yet.</strong> Nothing has been charged and you are not committed to anything. We only send a payment link for the full agreed price after we&rsquo;ve spoken and you&rsquo;ve agreed the final quotation.
           </p>
           <p>Please keep your reference handy when you call.</p>
         </div>
@@ -203,7 +222,7 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
               <h2 id="step-services" className="text-2xl sm:text-3xl">
                 Select your service
               </h2>
-              <p className="mt-2 text-ink-700">Add each room separately – for example Bedroom 1, Bedroom 2 and the living room. You can add a ceiling to any room on the next step.</p>
+              <p className="mt-2 text-ink-700">Add each room separately – for example Bedroom 1, Bedroom 2 and the living room. Every option shows its price, and your estimate updates as you go.</p>
               <div className="mt-6 grid gap-3 sm:grid-cols-2">
                 {ADD_OPTIONS.map(({ kind, label, note, icon: Icon }) => (
                   <button
@@ -217,19 +236,20 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
                       <Icon className="size-5" aria-hidden />
                     </span>
                     <span className="flex-1">
-                      <span className="block font-medium text-ink-950">+ Add {label.toLowerCase()}</span>
+                      <span className="block font-medium text-ink-950">+ Add {label}</span>
+                      <span className="block text-sm font-semibold text-brand-600">{optionPrice(kind, pricing)}</span>
                       <span className="block text-sm text-ink-600">{note}</span>
                     </span>
                   </button>
                 ))}
               </div>
 
-              <h3 className="mt-10 font-sans text-lg font-semibold">Your quotation ({items.length})</h3>
-              {items.length === 0 ? (
-                <p className="mt-3 rounded-lg bg-grey-50 p-5 text-ink-700">Nothing added yet. Choose from the options above.</p>
+              <h3 className="mt-10 font-sans text-lg font-semibold">Your rooms and services ({measured.length})</h3>
+              {measured.length === 0 ? (
+                <p className="mt-3 rounded-lg bg-grey-50 p-5 text-ink-700">No rooms added yet. Choose from the options above, or just pick extras below.</p>
               ) : (
                 <ul className="mt-3 divide-y divide-ink-900/8 rounded-2xl bg-white ring-1 ring-ink-900/10">
-                  {items.map((item) => (
+                  {measured.map((item) => (
                     <li key={item.id} className="flex items-center gap-3 px-4 py-3">
                       <PaintRoller className="size-5 shrink-0 text-brand-600" aria-hidden />
                       <label className="sr-only" htmlFor={`label-${item.id}`}>
@@ -246,6 +266,9 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
                         />
                         <Pencil className="pointer-events-none absolute right-2 top-1/2 size-3.5 -translate-y-1/2 text-ink-600/50" aria-hidden />
                       </div>
+                      <span className="shrink-0 text-right text-sm font-semibold text-ink-800">
+                        {quote.lines.some((l) => l.itemId === item.id) ? itemPriceText(item) : optionPrice(item.type, pricing)}
+                      </span>
                       <button type="button" onClick={() => removeItem(item.id)} className="grid size-10 place-items-center rounded-md text-ink-600 hover:bg-red-50 hover:text-red-700">
                         <Trash2 className="size-4" aria-hidden />
                         <span className="sr-only">Remove {item.label}</span>
@@ -254,6 +277,15 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
                   ))}
                 </ul>
               )}
+
+              <h3 className="mt-10 font-sans text-lg font-semibold">Extras</h3>
+              <p className="mt-1 mb-4 text-ink-700">Choose any extras and set how many. The price updates straight away.</p>
+              <ExtrasPicker items={extras} pricing={pricing} errors={extraErrors} onAdd={addExtra} onChange={changeExtra} onRemove={removeExtra} />
+
+              <div className="mt-8 flex items-baseline justify-between gap-4 rounded-2xl bg-ink-950 px-6 py-4 text-white" aria-live="polite">
+                <span className="text-sm font-semibold uppercase tracking-[0.14em] text-brand-300">Estimated labour so far</span>
+                <span className="text-2xl font-extrabold">{money(quote.totalPence)}</span>
+              </div>
             </section>
           )}
 
@@ -309,13 +341,15 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
               </details>
 
               <div className="mt-6 space-y-6">
-                {items.map((item) => (
+                {measured.length === 0 && <p className="rounded-lg bg-grey-50 p-5 text-ink-700">No measurements needed – you&rsquo;ve only chosen extras.</p>}
+                {measured.map((item) => (
                   <fieldset key={item.id} className="rounded-2xl bg-white p-5 ring-1 ring-ink-900/10 sm:p-6">
                     <legend className="sr-only">{item.label}</legend>
                     <h3 aria-hidden className="mb-5 font-bold tracking-tight text-xl">
                       {item.label}
                     </h3>
                     <ItemMeasurements item={item} unit={unit} errors={showErrors ? validations[item.id].errors : {}} update={(p) => update(item.id, p)} />
+                    <ItemPrice lines={quote.lines.filter((l) => l.itemId === item.id)} valid={validations[item.id].item !== null} />
                     <div className="mt-6 border-t border-ink-950/8 pt-5">
                       <h4 className="mb-1 text-[15px] font-bold text-ink-950">Condition</h4>
                       <p className="mb-4 text-sm text-ink-600">Small nail holes and minor cracks are included. Bigger repairs need a manual quotation.</p>
@@ -323,6 +357,22 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
                     </div>
                   </fieldset>
                 ))}
+                {extras.length > 0 && (
+                  <div className="rounded-2xl bg-white p-5 ring-1 ring-ink-900/10 sm:p-6">
+                    <h3 className="mb-4 font-bold tracking-tight text-xl">Your extras</h3>
+                    <ul className="divide-y divide-ink-950/8">
+                      {extras.map((e) => (
+                        <li key={e.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                          <div>
+                            <p className="font-semibold text-ink-950">{e.label}</p>
+                            <p className="text-sm text-ink-700">{extraErrors[e.id] ?? (e.quantity === null ? "Please enter a quantity" : extraWorking(e.extra, e.quantity, pricing))}</p>
+                          </div>
+                          <QuantityStepper id={`qty2-${e.extra}`} label={e.label.toLowerCase()} value={e.quantity} onChange={(n) => changeExtra(e.extra, n)} onRemove={() => removeExtra(e.extra)} />
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             </section>
           )}
@@ -356,7 +406,7 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
                   <p className="text-sm leading-relaxed text-ink-600">{ESTIMATE_STATEMENT}</p>
                 </div>
                 <div className="space-y-6">
-                  <CallToDiscuss phone={phone} depositPercent={depositPercent} compact />
+                  <CallToDiscuss phone={phone} compact />
                   <ul className="space-y-3">
                     {PRICING_RULES.map(({ icon: Icon, title, text }) => (
                       <li key={title} className="flex gap-3">
@@ -457,22 +507,22 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
             <div className="rounded-2xl bg-ink-950 p-6 text-white">
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand-300">Running estimate</p>
               <p className="mt-2 font-bold tracking-tight text-4xl" aria-live="polite">
-                {quote.hasPricedItems ? formatPence(quote.totalPence) : "—"}
+                {money(quote.totalPence)}
               </p>
+              {!quote.hasPricedItems && <p className="mt-1 text-xs text-brand-300">Enter measurements or quantities to see your price.</p>}
               <p className="mt-1 text-sm text-ink-100/70">Labour only · paint not included</p>
               <ul className="mt-5 space-y-2 border-t border-white/10 pt-4 text-sm">
-                {items.map((item) => {
-                  const lines = quote.lines.filter((l) => l.itemId === item.id);
-                  const total = lines.reduce((s, l) => s + (l.amountPence ?? 0), 0);
-                  const manual = lines.some((l) => l.status === "manual");
-                  return (
-                    <li key={item.id} className="flex justify-between gap-3">
-                      <span className="truncate text-ink-100/85">{item.label}</span>
-                      <span className="shrink-0 font-medium">{lines.length === 0 ? "…" : manual ? "Manual quote" : formatPence(total)}</span>
-                    </li>
-                  );
-                })}
+                {items.map((item) => (
+                  <li key={item.id} className="flex justify-between gap-3">
+                    <span className="truncate text-ink-100/85">
+                      {item.label}
+                      {item.type === "extra" && item.quantity !== null ? ` × ${item.quantity}` : ""}
+                    </span>
+                    <span className="shrink-0 font-medium">{itemPriceText(item)}</span>
+                  </li>
+                ))}
               </ul>
+              {quote.requiresManualQuote && <p className="mt-4 text-xs text-brand-300">Items marked &ldquo;Inspection required&rdquo; aren&rsquo;t in this total – {INSPECTION_MESSAGE.toLowerCase()}.</p>}
               {quote.needsReview && <p className="mt-4 text-xs text-brand-300">Some items are flagged for review – see the estimate step.</p>}
             </div>
           </aside>
@@ -489,7 +539,7 @@ export function QuoteCalculator({ pricing, uploadsEnabled, phone, depositPercent
                 <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-brand-300">Running estimate</p>
                 <p className="text-xs text-ink-100/70">Labour only · paint not included</p>
               </div>
-              <p className="font-bold tracking-tight text-2xl">{quote.hasPricedItems ? formatPence(quote.totalPence) : "—"}</p>
+              <p className="font-bold tracking-tight text-2xl">{money(quote.totalPence)}</p>
             </div>
           </div>
         </>

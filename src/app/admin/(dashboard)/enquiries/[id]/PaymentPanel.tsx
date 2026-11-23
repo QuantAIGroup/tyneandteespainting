@@ -1,14 +1,13 @@
 import { ExternalLink } from "lucide-react";
 import { bookingStatusLabel } from "@/lib/payments/booking";
 import { outstandingBalance, paymentLabel, type PaymentType } from "@/lib/payments/deposit";
-import { getPaymentSettings } from "@/lib/settings";
 import { paymentLinkUrl } from "@/lib/payments/checkout";
 import { isStripeConfigured, stripeDashboardPaymentUrl, stripeMode } from "@/lib/payments/stripe";
 import { formatPence } from "@/lib/pricing/engine";
 import type { QuoteItem } from "@/lib/pricing/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { Alert } from "@/components/ui/Form";
-import { AgreePriceForm, BalancePaidForm, DepositLinkControls } from "./PaymentControls";
+import { AgreePriceForm, BalancePaidForm, PaymentLinkControls } from "./PaymentControls";
 
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "Europe/London" }) : "—");
 
@@ -21,7 +20,7 @@ function defaultServiceText(items: QuoteItem[]): string {
     .join(", ");
 }
 
-/** Payment tracking + the deposit workflow for one enquiry. */
+/** Payment tracking + the full-payment workflow for one enquiry. */
 export async function PaymentPanel({ enquiry, items, estimatePence }: { enquiry: Record<string, unknown>; items: QuoteItem[]; estimatePence: number }) {
   const agreed = (enquiry.agreed_price_pence as number | null) ?? null;
   const deposit = (enquiry.deposit_pence as number | null) ?? null;
@@ -31,10 +30,9 @@ export async function PaymentPanel({ enquiry, items, estimatePence }: { enquiry:
   const pi = enquiry.stripe_payment_intent_id as string | null;
   const status = enquiry.status as string;
   const token = enquiry.payment_token as string | null;
-  const paymentType = ((enquiry.payment_type as string) ?? "deposit") as PaymentType;
+  const paymentType = ((enquiry.payment_type as string) ?? "full") as PaymentType;
   const percent = (enquiry.deposit_percent as number | null) ?? null;
   const label = paymentLabel(paymentType, percent);
-  const { defaultDepositPercent } = await getPaymentSettings();
   const outstanding = outstandingBalance({ agreedPricePence: agreed, depositPaidPence: depositPaid, balancePaidPence: balancePaid });
 
   // Any duplicate / unusual payments for this booking
@@ -102,7 +100,10 @@ export async function PaymentPanel({ enquiry, items, estimatePence }: { enquiry:
 
         {paidAt ? (
           <>
-            <Alert tone="success">Payment verified by Stripe. The agreed price is now locked.{outstanding ? " The remaining balance is never charged automatically – collect it as agreed." : ""}</Alert>
+            <Alert tone="success">
+              Payment verified by Stripe{paymentType === "full" ? " – paid in full and the booking is confirmed" : ""}. The agreed price is now locked.
+              {outstanding ? " The remaining balance is never charged automatically – collect it as agreed." : ""} Refunds (see the cancellation policy) are made in your Stripe dashboard, back to the customer&rsquo;s original payment method.
+            </Alert>
             {!enquiry.balance_paid_at && outstanding !== null && outstanding > 0 && <BalancePaidForm id={enquiry.id as string} balanceLabel={formatPence(outstanding)} />}
           </>
         ) : (
@@ -115,20 +116,18 @@ export async function PaymentPanel({ enquiry, items, estimatePence }: { enquiry:
                 defaultPricePence={agreed}
                 estimatePence={estimatePence}
                 hasActiveLink={status === "deposit_requested"}
-                defaultDepositPercent={defaultDepositPercent}
-                current={{ type: paymentType, percent, amountPence: deposit }}
               />
             </div>
             {agreed && deposit && ["price_agreed", "deposit_requested"].includes(status) && (
               <div className="border-t border-ink-900/8 pt-5">
                 <h3 className="mb-1 font-sans text-[15px] font-semibold text-ink-950">2. Send the payment request ({label}: {formatPence(deposit)})</h3>
                 <p className="mb-3 text-sm text-ink-600">The customer can&rsquo;t change the amount. It is only marked paid once Stripe confirms the payment.</p>
-                <DepositLinkControls
+                <PaymentLinkControls
                   id={enquiry.id as string}
                   existingLink={status === "deposit_requested" && token ? paymentLinkUrl(token) : null}
                   phone={enquiry.phone as string}
                   firstName={String(enquiry.full_name).split(" ")[0]}
-                  depositLabel={`your ${label.toLowerCase()} of ${formatPence(deposit)}`}
+                  amountLabel={paymentType === "full" ? `the agreed price of ${formatPence(deposit)}` : `your ${label.toLowerCase()} of ${formatPence(deposit)}`}
                   sendCount={(enquiry.payment_link_send_count as number) ?? 0}
                 />
                 {status === "deposit_requested" && <p className="mt-2 text-xs text-ink-600">Requested {fmtDate(enquiry.deposit_requested_at as string)} · last sent {fmtDate(enquiry.payment_link_last_sent_at as string)}</p>}

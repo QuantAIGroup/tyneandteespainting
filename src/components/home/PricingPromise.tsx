@@ -10,7 +10,7 @@ export const PRICING_RULES = [
   { icon: Hammer, title: "Major repairs quoted separately", text: "Larger plaster repairs are always quoted and agreed first." },
   { icon: Clock, title: "No hourly charges", text: "You pay for the room, not the time on the clock." },
   { icon: Ban, title: "No undisclosed extras", text: "If the job changes, we explain why and get your approval first." },
-  { icon: PhoneCall, title: "Free estimates, deposit only once agreed", text: "No payment for an estimate. A 50% deposit secures your booking only after we've spoken and agreed your price." },
+  { icon: PhoneCall, title: "Free estimates, pay only once agreed", text: "No payment for an estimate. You only pay – the full agreed price – after we've spoken and agreed your final quotation." },
 ];
 
 export function PricingPromise({ compact = false }: { compact?: boolean }) {

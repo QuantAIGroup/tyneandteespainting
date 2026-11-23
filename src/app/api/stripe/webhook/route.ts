@@ -1,8 +1,8 @@
 /**
- * STRIPE WEBHOOK – the ONLY place a deposit is marked as paid.
+ * STRIPE WEBHOOK – the ONLY place a payment is marked as received.
  *
  * Stripe calls this after a payment. We check the signature (so nobody can fake
- * it), check the amount matches the deposit due, then record the payment.
+ * it), check the amount matches the amount due (100% of the agreed price), then record the payment.
  * - The same event arriving twice is ignored.
  * - A second payment for an already-paid booking is refunded automatically.
  * - Anything unexpected (wrong amount, cancelled booking) is logged for you to
@@ -15,7 +15,8 @@
 import { NextResponse } from "next/server";
 import type Stripe from "stripe";
 import { isUuid } from "@/lib/enquiry";
-import { decideDepositOutcome } from "@/lib/payments/booking";
+import { decideDepositOutcome, statusAfterVerifiedPayment } from "@/lib/payments/booking";
+import { CANCELLATION_SUMMARY } from "@/config/cancellation";
 import { paidHeadline, paymentLabel } from "@/lib/payments/deposit";
 import { getStripe, verifyStripeWebhook } from "@/lib/payments/stripe";
 import { sendCustomerEmail, sendNotification } from "@/lib/notifications";
@@ -152,7 +153,9 @@ async function handlePaidSession(
     const { data: updated, error: updateError } = await supabase
       .from("enquiries")
       .update({
-        status: "deposit_paid",
+        // Full payment confirms the booking straight away
+        status: statusAfterVerifiedPayment(enquiry.payment_type as string),
+        ...(enquiry.payment_type === "full" ? { booking_confirmed_at: new Date().toISOString() } : {}),
         deposit_paid_pence: amountPence,
         deposit_paid_at: new Date().toISOString(),
         stripe_payment_intent_id: paymentIntentId,
@@ -199,7 +202,7 @@ async function handlePaidSession(
   await sendNotification(
     `⚠ Payment needs checking – ${enquiry?.reference ?? session.id}`,
     [
-      `A payment of ${formatPence(amountPence)} was received but has NOT been marked as a paid deposit.`,
+      `A payment of ${formatPence(amountPence)} was received but has NOT been marked as paid.`,
       `Reason: ${reason}`,
       `Stripe payment: ${paymentIntentId}`,
       enquiry
@@ -240,7 +243,7 @@ async function refundDuplicate(
     );
     refunded = true;
   } catch (err) {
-    console.error("Automatic refund of duplicate deposit failed", err);
+    console.error("Automatic refund of duplicate payment failed", err);
   }
   await logPayment(
     refunded ? "duplicate_refunded" : "duplicate_refund_failed",
@@ -264,22 +267,26 @@ async function sendPaidEmails(enquiry: Record<string, unknown>, amountPence: num
   const agreed = enquiry.agreed_price_pence as number;
   const balance = agreed - amountPence;
   const label = paymentLabel(enquiry.payment_type as string, enquiry.deposit_percent as number | null);
-  await sendCustomerEmail(enquiry.email as string, `Payment received – your painting booking is secured (${enquiry.reference})`, [
+  const full = enquiry.payment_type === "full";
+  await sendCustomerEmail(enquiry.email as string, `Payment received – your painting booking is ${full ? "confirmed" : "secured"} (${enquiry.reference})`, [
     `Hi ${String(enquiry.full_name).split(" ")[0]},`,
     paidHeadline(enquiry.payment_type as string, enquiry.deposit_percent as number | null),
-    `Your painting booking is now secured. ${business.name} will contact you to confirm the arrangements for your job.`,
+    `Your painting booking is now ${full ? "confirmed" : "secured"}. ${business.name} will contact you to confirm the arrangements for your job.`,
     `Work: ${enquiry.agreed_service}`,
     `Agreed job price: ${formatPence(agreed)}`,
     `${label} paid: ${formatPence(amountPence)}`,
     ...(balance > 0 ? [`Remaining balance: ${formatPence(balance)} – payable separately as agreed. It will not be charged automatically.`] : []),
     `Booking reference: ${enquiry.reference}`,
     `Payment reference: ${paymentIntentId}`,
+    `Cancellations and refunds:`,
+    ...CANCELLATION_SUMMARY.map((l) => `• ${l}`),
+    `Your right to cancel and the cancellation form: ${SITE.url}/cancellation`,
     `Questions? Call ${business.phone}.`,
     `Thank you for choosing ${business.name}.`,
   ]);
   await sendNotification(`💷 Payment received – ${enquiry.reference} – ${enquiry.full_name}`, [
     `${enquiry.full_name} has paid ${formatPence(amountPence)} (${label}, verified by Stripe).`,
-    `Agreed price: ${formatPence(agreed)} · Balance to collect: ${formatPence(balance)}`,
+    full ? `Paid in full – booking confirmed. Agreed price: ${formatPence(agreed)}` : `Agreed price: ${formatPence(agreed)} · Balance to collect: ${formatPence(balance)}`,
     `Stripe payment: ${paymentIntentId}`,
     `Enquiry: ${SITE.url}/admin/enquiries/${enquiry.id}`,
   ]);

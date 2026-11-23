@@ -1,9 +1,9 @@
 import { requireAdmin } from "@/lib/auth";
-import { parseBusiness, parsePayments, parsePricing } from "@/lib/settings";
+import { parseBusiness, parsePricing } from "@/lib/settings";
 import { createSessionClient } from "@/lib/supabase/server";
 import { isEmailConfigured } from "@/lib/notifications";
 import { isStripeConfigured, stripeMode } from "@/lib/payments/stripe";
-import { BusinessForm, PaymentSettingsForm, PricingForm } from "./SettingsForms";
+import { BusinessForm, PricingForm } from "./SettingsForms";
 
 export default async function SettingsPage() {
   await requireAdmin();
@@ -11,7 +11,6 @@ export default async function SettingsPage() {
   const { data } = await supabase.from("settings").select("key, value");
   const pricing = parsePricing(data?.find((r) => r.key === "pricing")?.value);
   const business = parseBusiness(data?.find((r) => r.key === "business")?.value);
-  const payments = parsePayments(data?.find((r) => r.key === "payments")?.value);
 
   return (
     <div className="space-y-10">
@@ -21,9 +20,12 @@ export default async function SettingsPage() {
       </div>
       <PricingForm pricing={pricing} />
       <BusinessForm business={business} />
-      <PaymentSettingsForm defaultDepositPercent={payments.defaultDepositPercent} />
       <section className="rounded-xl bg-white p-6 ring-1 ring-ink-900/10">
-        <h2 className="font-sans text-lg font-semibold">Online deposit payments (Stripe)</h2>
+        <h2 className="font-sans text-lg font-semibold">Online payments (Stripe)</h2>
+        <p className="mt-2 text-[15px] text-ink-700">
+          Customers pay <strong>100% of the final agreed price</strong>, and only after you&rsquo;ve spoken to them and approved the price on their enquiry. A successful payment
+          confirms the booking. The online estimate is never charged.
+        </p>
         <p className="mt-2 text-[15px] text-ink-700">
           {!isStripeConfigured()
             ? "Not connected yet. Add STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET to your environment variables (see README.md)."

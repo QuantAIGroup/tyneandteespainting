@@ -19,8 +19,13 @@ export interface QuoteRoomRow {
   walls: { width: number; height: number }[] | null;
   skirting_length_m: number | null;
   include_ceiling: boolean;
-  coats: number;
+  /** null for counted extras (door frames, radiators…) */
+  coats: number | null;
   condition: unknown;
+  /** Counted extras only: which extra, how many, and the price each (null = inspection needed). */
+  extra_kind: string | null;
+  quantity: number | null;
+  unit_price_pence: number | null;
   wall_area_sqm: number | null;
   ceiling_area_sqm: number | null;
   estimated_labour_pence: number | null;
@@ -38,17 +43,37 @@ export function buildQuoteRoomRows(enquiryId: string, items: QuoteItem[], quote:
       position,
       item_type: item.type,
       label: item.label,
-      coats: item.coats,
-      condition: item.condition,
       estimated_labour_pence: estimated,
       requires_manual_quote: manual,
     };
+
+    if (item.type === "extra") {
+      const line = lines[0];
+      return {
+        ...base,
+        coats: null,
+        condition: null,
+        extra_kind: item.extra,
+        quantity: item.quantity,
+        unit_price_pence: line && line.status === "priced" ? line.ratePence : null,
+        measurement_mode: null,
+        length_m: null,
+        width_m: null,
+        height_m: null,
+        walls: null,
+        skirting_length_m: null,
+        include_ceiling: false,
+        wall_area_sqm: null,
+        ceiling_area_sqm: null,
+      };
+    }
+    const measured = { ...base, coats: item.coats, condition: item.condition, extra_kind: null, quantity: null, unit_price_pence: null };
 
     if (item.type === "bedroom" || item.type === "living_room") {
       const simple = item.measurementMode === "simple";
       const hasFloor = simple || item.includeCeiling;
       return {
-        ...base,
+        ...measured,
         measurement_mode: item.measurementMode,
         length_m: hasFloor ? item.length : null,
         width_m: hasFloor ? item.width : null,
@@ -62,7 +87,7 @@ export function buildQuoteRoomRows(enquiryId: string, items: QuoteItem[], quote:
     }
     if (item.type === "ceiling") {
       return {
-        ...base,
+        ...measured,
         measurement_mode: null,
         length_m: item.length,
         width_m: item.width,
@@ -75,7 +100,7 @@ export function buildQuoteRoomRows(enquiryId: string, items: QuoteItem[], quote:
       };
     }
     return {
-      ...base,
+      ...measured,
       measurement_mode: null,
       length_m: null,
       width_m: null,

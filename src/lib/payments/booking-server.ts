@@ -48,7 +48,7 @@ export async function getBookingByToken(token: string): Promise<PaymentBooking |
     depositPaidAt: (data.deposit_paid_at as string | null) ?? null,
     depositRequestedAt: (data.deposit_requested_at as string | null) ?? null,
     stripeCheckoutSessionId: (data.stripe_checkout_session_id as string | null) ?? null,
-    paymentType: ((data.payment_type as string) ?? "deposit") as PaymentBooking["paymentType"],
+    paymentType: ((data.payment_type as string) ?? "full") as PaymentBooking["paymentType"],
     depositPercent: (data.deposit_percent as number | null) ?? null,
     stripePaymentIntentId: (data.stripe_payment_intent_id as string | null) ?? null,
     stripeReceiptUrl: (data.stripe_receipt_url as string | null) ?? null,

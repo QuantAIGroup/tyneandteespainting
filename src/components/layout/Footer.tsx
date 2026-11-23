@@ -12,6 +12,7 @@ const LINKS = [
   { href: "/contact", label: "Contact" },
   { href: "/privacy", label: "Privacy Policy" },
   { href: "/terms", label: "Terms and Conditions" },
+  { href: "/cancellation", label: "Cancellations & Refunds" },
 ];
 
 export async function Footer() {

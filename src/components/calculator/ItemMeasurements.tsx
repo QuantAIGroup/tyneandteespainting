@@ -3,11 +3,11 @@
 import { Plus, Trash2 } from "lucide-react";
 import { ceilingArea, round2, simpleWallArea, wallsArea } from "@/lib/pricing/engine";
 import { LIMITS } from "@/lib/pricing/schema";
-import type { CeilingDraft, ItemDraft, RoomDraft, SkirtingDraft, Unit } from "./draft";
+import type { CeilingDraft, MeasuredDraft, RoomDraft, SkirtingDraft, Unit } from "./draft";
 import { newWall } from "./draft";
 import { NumberInput } from "./NumberInput";
 
-type Update = (patch: Partial<ItemDraft>) => void;
+type Update = (patch: Partial<MeasuredDraft>) => void;
 
 function AreaNote({ label, value, unit }: { label: string; value: number | null; unit: string }) {
   if (value === null || !Number.isFinite(value) || value <= 0) return null;
@@ -156,7 +156,7 @@ function CeilingMeasurements({ item, unit, errors, update }: { item: CeilingDraf
   );
 }
 
-export function ItemMeasurements({ item, unit, errors, update }: { item: ItemDraft; unit: Unit; errors: Record<string, string>; update: Update }) {
+export function ItemMeasurements({ item, unit, errors, update }: { item: MeasuredDraft; unit: Unit; errors: Record<string, string>; update: Update }) {
   if (item.type === "skirting") return <SkirtingMeasurements item={item} unit={unit} errors={errors} update={update} />;
   if (item.type === "ceiling") return <CeilingMeasurements item={item} unit={unit} errors={errors} update={update} />;
   return <RoomMeasurements item={item} unit={unit} errors={errors} update={update} />;

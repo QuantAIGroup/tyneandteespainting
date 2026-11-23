@@ -12,6 +12,23 @@ import {
 import { quoteItemsSchema } from "./schema";
 import type { CeilingItem, PaintedRoomItem, PricingSettings, SkirtingItem } from "./types";
 
+/**
+ * The launch price list (Nov 2026), before the Nov 2026 price revision:
+ * skirting £5/m (£65 min), ceiling £5.50/m² (£65 min), total rounded to £5.
+ * These original tests keep using it so the maths they check (minimums,
+ * £5 rounding, per-m² rates) is still tested with exactly the same numbers.
+ * The new prices are tested in pricing-v2.test.ts.
+ */
+const PREVIOUS_PRICING: PricingSettings = {
+  ...DEFAULT_PRICING,
+  bedroom: { ratePerSqm: 5.5, minimumCharge: 185 },
+  livingRoom: { ratePerSqm: 5.5, minimumCharge: 225 },
+  skirting: { ratePerMetre: 5, minimumCharge: 65 },
+  ceiling: { ratePerSqm: 5.5, minimumCharge: 65 },
+  roundToNearest: 5,
+  standardCoats: 2,
+};
+
 const goodCondition: PaintedRoomItem["condition"] = {
   surface: "good",
   newlySkimmed: false,
@@ -110,7 +127,7 @@ describe("rounding", () => {
 
 describe("calculateQuote", () => {
   it("prices a single bedroom", () => {
-    const q = calculateQuote([room()], DEFAULT_PRICING);
+    const q = calculateQuote([room()], PREVIOUS_PRICING);
     expect(q.lines).toHaveLength(1);
     expect(q.lines[0].quantity).toBe(36);
     expect(q.subtotalPence).toBe(19800);
@@ -120,24 +137,24 @@ describe("calculateQuote", () => {
   });
 
   it("applies the bedroom minimum of £185 to a small bedroom", () => {
-    const q = calculateQuote([room({ length: 2.5, width: 2, height: 2.4 })], DEFAULT_PRICING); // 21.6 m² = £118.80
+    const q = calculateQuote([room({ length: 2.5, width: 2, height: 2.4 })], PREVIOUS_PRICING); // 21.6 m² = £118.80
     expect(q.lines[0].minimumApplied).toBe(true);
     expect(q.totalPence).toBe(18500);
   });
 
   it("applies the living room minimum of £225", () => {
-    const q = calculateQuote([room({ type: "living_room", label: "Living room", length: 3, width: 3, height: 2.4 })], DEFAULT_PRICING); // 28.8 m² = £158.40
+    const q = calculateQuote([room({ type: "living_room", label: "Living room", length: 3, width: 3, height: 2.4 })], PREVIOUS_PRICING); // 28.8 m² = £158.40
     expect(q.lines[0].amountPence).toBe(22500);
     expect(q.totalPence).toBe(22500);
   });
 
   it("prices skirting boards per linear metre with a £65 minimum", () => {
-    expect(calculateQuote([skirting({ linearMetres: 15 })], DEFAULT_PRICING).totalPence).toBe(7500);
-    expect(calculateQuote([skirting({ linearMetres: 8 })], DEFAULT_PRICING).totalPence).toBe(6500);
+    expect(calculateQuote([skirting({ linearMetres: 15 })], PREVIOUS_PRICING).totalPence).toBe(7500);
+    expect(calculateQuote([skirting({ linearMetres: 8 })], PREVIOUS_PRICING).totalPence).toBe(6500);
   });
 
   it("prices a room ceiling as a separate line with its own minimum", () => {
-    const q = calculateQuote([room({ includeCeiling: true })], DEFAULT_PRICING);
+    const q = calculateQuote([room({ includeCeiling: true })], PREVIOUS_PRICING);
     expect(q.lines).toHaveLength(2);
     const ceilingLine = q.lines.find((l) => l.kind === "ceiling")!;
     expect(ceilingLine.quantity).toBe(14); // 4 × 3.5
@@ -148,7 +165,7 @@ describe("calculateQuote", () => {
   });
 
   it("applies the ceiling minimum to a small standalone ceiling", () => {
-    const q = calculateQuote([ceiling({ length: 2, width: 2 })], DEFAULT_PRICING); // 4 m² = £22
+    const q = calculateQuote([ceiling({ length: 2, width: 2 })], PREVIOUS_PRICING); // 4 m² = £22
     expect(q.lines[0].amountPence).toBe(6500);
   });
 
@@ -159,7 +176,7 @@ describe("calculateQuote", () => {
       room({ id: "l1", type: "living_room", label: "Living room", length: 5, width: 4, height: 2.5 }), // 45 m² = £247.50
       skirting({ linearMetres: 40 }), // £200
     ];
-    const q = calculateQuote(items, DEFAULT_PRICING);
+    const q = calculateQuote(items, PREVIOUS_PRICING);
     expect(q.lines).toHaveLength(4);
     expect(q.subtotalPence).toBe(19800 + 18500 + 24750 + 20000); // £830.50
     expect(q.totalPence).toBe(83000);
@@ -169,7 +186,7 @@ describe("calculateQuote", () => {
   it("matches the example in the brief (bedroom £200, skirting £75, ceiling £65 → £340)", () => {
     const q = calculateQuote(
       [room({ length: 4, width: 3.5, height: 2.4 }), skirting({ linearMetres: 15 }), ceiling({ length: 2, width: 2 })],
-      DEFAULT_PRICING,
+      PREVIOUS_PRICING,
     );
     // £198 + £75 + £65 = £338 → rounded to £340
     expect(q.totalPence).toBe(34000);
@@ -178,7 +195,7 @@ describe("calculateQuote", () => {
   it("uses individual wall measurements for irregular rooms", () => {
     const q = calculateQuote(
       [room({ measurementMode: "walls", walls: [{ width: 5, height: 2.4 }, { width: 4, height: 2.4 }, { width: 5, height: 2.4 }, { width: 4, height: 2.4 }] })],
-      DEFAULT_PRICING,
+      PREVIOUS_PRICING,
     );
     expect(q.lines[0].quantity).toBe(43.2);
     expect(q.subtotalPence).toBe(23760);
@@ -186,20 +203,20 @@ describe("calculateQuote", () => {
   });
 
   it("uses whatever prices are configured in settings", () => {
-    const custom: PricingSettings = { ...DEFAULT_PRICING, bedroom: { ratePerSqm: 6, minimumCharge: 200 }, roundToNearest: 10 };
+    const custom: PricingSettings = { ...PREVIOUS_PRICING, bedroom: { ratePerSqm: 6, minimumCharge: 200 }, roundToNearest: 10 };
     const q = calculateQuote([room()], custom); // 36 × £6 = £216 → nearest £10 = £220
     expect(q.totalPence).toBe(22000);
   });
 
   it("never charges for paint or materials (only labour lines exist)", () => {
-    const q = calculateQuote([room({ includeCeiling: true }), skirting()], DEFAULT_PRICING);
+    const q = calculateQuote([room({ includeCeiling: true }), skirting()], PREVIOUS_PRICING);
     expect(q.lines.every((l) => ["walls", "ceiling", "skirting"].includes(l.kind))).toBe(true);
   });
 });
 
 describe("manual quotations and review flags", () => {
   it("does not auto-price a room with major damage", () => {
-    const q = calculateQuote([room({ condition: { ...goodCondition, surface: "major_damage" } })], DEFAULT_PRICING);
+    const q = calculateQuote([room({ condition: { ...goodCondition, surface: "major_damage" } })], PREVIOUS_PRICING);
     expect(q.requiresManualQuote).toBe(true);
     expect(q.lines[0].status).toBe("manual");
     expect(q.lines[0].amountPence).toBeNull();
@@ -208,43 +225,43 @@ describe("manual quotations and review flags", () => {
   });
 
   it("requires a manual quote for wallpaper removal and damp", () => {
-    expect(calculateQuote([room({ condition: { ...goodCondition, wallpaperToRemove: true } })], DEFAULT_PRICING).requiresManualQuote).toBe(true);
-    expect(calculateQuote([room({ condition: { ...goodCondition, dampOrStains: true } })], DEFAULT_PRICING).requiresManualQuote).toBe(true);
+    expect(calculateQuote([room({ condition: { ...goodCondition, wallpaperToRemove: true } })], PREVIOUS_PRICING).requiresManualQuote).toBe(true);
+    expect(calculateQuote([room({ condition: { ...goodCondition, dampOrStains: true } })], PREVIOUS_PRICING).requiresManualQuote).toBe(true);
   });
 
   it("also withholds the ceiling price for a room needing a manual quote", () => {
-    const q = calculateQuote([room({ includeCeiling: true, condition: { ...goodCondition, wallpaperToRemove: true } })], DEFAULT_PRICING);
+    const q = calculateQuote([room({ includeCeiling: true, condition: { ...goodCondition, wallpaperToRemove: true } })], PREVIOUS_PRICING);
     expect(q.lines.every((l) => l.status === "manual")).toBe(true);
   });
 
   it("still prices other rooms when one needs a manual quote", () => {
-    const q = calculateQuote([room({ id: "a" }), room({ id: "b", condition: { ...goodCondition, surface: "major_damage" } })], DEFAULT_PRICING);
+    const q = calculateQuote([room({ id: "a" }), room({ id: "b", condition: { ...goodCondition, surface: "major_damage" } })], PREVIOUS_PRICING);
     expect(q.requiresManualQuote).toBe(true);
     expect(q.hasPricedItems).toBe(true);
     expect(q.totalPence).toBe(20000);
   });
 
   it("includes minor defects in the standard price with no flag", () => {
-    const q = calculateQuote([room({ condition: { ...goodCondition, surface: "minor_defects" } })], DEFAULT_PRICING);
+    const q = calculateQuote([room({ condition: { ...goodCondition, surface: "minor_defects" } })], PREVIOUS_PRICING);
     expect(q.flags).toHaveLength(0);
     expect(q.totalPence).toBe(20000);
   });
 
   it("flags extra coats for review but keeps the standard price", () => {
-    const q = calculateQuote([room({ coats: 3 })], DEFAULT_PRICING);
+    const q = calculateQuote([room({ coats: 3 })], PREVIOUS_PRICING);
     expect(q.needsReview).toBe(true);
     expect(q.requiresManualQuote).toBe(false);
     expect(q.totalPence).toBe(20000);
   });
 
   it("flags new plaster and significant colour changes for review", () => {
-    expect(calculateQuote([room({ condition: { ...goodCondition, newlySkimmed: true } })], DEFAULT_PRICING).needsReview).toBe(true);
-    expect(calculateQuote([room({ condition: { ...goodCondition, colourChange: "significant" } })], DEFAULT_PRICING).needsReview).toBe(true);
+    expect(calculateQuote([room({ condition: { ...goodCondition, newlySkimmed: true } })], PREVIOUS_PRICING).needsReview).toBe(true);
+    expect(calculateQuote([room({ condition: { ...goodCondition, colourChange: "significant" } })], PREVIOUS_PRICING).needsReview).toBe(true);
   });
 
   it("flags bare-wood skirting for review and damaged skirting for a manual quote", () => {
-    expect(calculateQuote([skirting({ condition: "bare_wood" })], DEFAULT_PRICING).needsReview).toBe(true);
-    expect(calculateQuote([skirting({ condition: "major_damage" })], DEFAULT_PRICING).requiresManualQuote).toBe(true);
+    expect(calculateQuote([skirting({ condition: "bare_wood" })], PREVIOUS_PRICING).needsReview).toBe(true);
+    expect(calculateQuote([skirting({ condition: "major_damage" })], PREVIOUS_PRICING).requiresManualQuote).toBe(true);
   });
 });
 

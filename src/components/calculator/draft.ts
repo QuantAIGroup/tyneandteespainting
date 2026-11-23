@@ -3,8 +3,9 @@
  * while the customer is typing; they are converted into proper QuoteItems for
  * the pricing engine once they're valid.
  */
-import { ceilingSchema, paintedRoomSchema, skirtingSchema } from "@/lib/pricing/schema";
-import type { QuoteItem, RoomCondition, RoomType, SkirtingCondition, SurfaceCondition } from "@/lib/pricing/types";
+import { EXTRAS } from "@/lib/pricing/extras";
+import { ceilingSchema, extraSchema, paintedRoomSchema, skirtingSchema } from "@/lib/pricing/schema";
+import type { ExtraKind, QuoteItem, RoomCondition, RoomType, SkirtingCondition, SurfaceCondition } from "@/lib/pricing/types";
 
 export type Num = number | null;
 export type Unit = "m" | "cm";
@@ -48,15 +49,34 @@ export interface CeilingDraft {
   condition: { surface: SurfaceCondition; newlySkimmed: boolean; dampOrStains: boolean };
 }
 
-export type ItemDraft = RoomDraft | SkirtingDraft | CeilingDraft;
-export type ItemKind = ItemDraft["type"];
+/** A counted extra (door frames, radiators…). quantity is null while the box is empty. */
+export interface ExtraDraft {
+  id: string;
+  type: "extra";
+  label: string;
+  extra: ExtraKind;
+  quantity: number | null;
+}
 
-export const ITEM_NAMES: Record<ItemKind, string> = {
+/** Items that need measurements and a condition check. */
+export type MeasuredDraft = RoomDraft | SkirtingDraft | CeilingDraft;
+export type ItemDraft = MeasuredDraft | ExtraDraft;
+/** Kinds the customer adds with "+ Add" (extras are chosen separately). */
+export type ItemKind = MeasuredDraft["type"];
+
+export const ITEM_NAMES: Record<ItemDraft["type"], string> = {
   bedroom: "Bedroom",
   living_room: "Living room",
   skirting: "Skirting boards",
-  ceiling: "Ceiling",
+  ceiling: "Ceiling painting",
+  extra: "Extra",
 };
+
+export const isMeasured = (d: ItemDraft): d is MeasuredDraft => d.type !== "extra";
+
+export function createExtra(kind: ExtraKind, quantity = 1): ExtraDraft {
+  return { id: `extra-${kind}`, type: "extra", label: EXTRAS[kind].name, extra: kind, quantity };
+}
 
 const newId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2));
 
@@ -67,7 +87,7 @@ export function newWall(): WallDraft {
 /** Label like "Bedroom 2" based on how many of that type already exist. */
 export function nextLabel(kind: ItemKind, items: ItemDraft[]): string {
   const sameType = items.filter((i) => i.type === kind).length;
-  const base = ITEM_NAMES[kind];
+  const base = kind === "ceiling" ? "Ceiling" : ITEM_NAMES[kind];
   if (kind === "skirting" || kind === "ceiling") return sameType === 0 ? base : `${base} ${sameType + 1}`;
   if (kind === "living_room" && sameType === 0) return base;
   return `${base} ${sameType + 1}`;
@@ -101,7 +121,9 @@ const u = (n: Num) => (n === null ? undefined : n);
 /** Validate one draft. Returns the clean item, or a map of field → error message. */
 export function validateDraft(draft: ItemDraft): { item: QuoteItem | null; errors: Record<string, string> } {
   let result;
-  if (draft.type === "skirting") {
+  if (draft.type === "extra") {
+    result = extraSchema.safeParse({ ...draft, quantity: u(draft.quantity) });
+  } else if (draft.type === "skirting") {
     result = skirtingSchema.safeParse({ ...draft, linearMetres: u(draft.linearMetres) });
   } else if (draft.type === "ceiling") {
     result = ceilingSchema.safeParse({ ...draft, length: u(draft.length), width: u(draft.width) });
@@ -120,7 +142,7 @@ export function validateDraft(draft: ItemDraft): { item: QuoteItem | null; error
     const key = issue.path.join(".");
     if (!errors[key]) {
       // zod's default "expected number, received undefined" → friendlier wording
-      errors[key] = issue.message.startsWith("Invalid input") ? "Please enter a measurement" : issue.message;
+      errors[key] = issue.message.startsWith("Invalid input") ? (draft.type === "extra" ? "Please enter a quantity" : "Please enter a measurement") : issue.message;
     }
   }
   return { item: null, errors };

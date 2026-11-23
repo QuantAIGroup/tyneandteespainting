@@ -1,6 +1,33 @@
 import { AlertTriangle, Info } from "lucide-react";
-import { formatPence } from "@/lib/pricing/engine";
-import type { QuoteResult } from "@/lib/pricing/types";
+import { INSPECTION_MESSAGE } from "@/lib/pricing/extras";
+import type { LineCategory, QuoteLine, QuoteResult } from "@/lib/pricing/types";
+import { lineWorking, money } from "./prices";
+
+/** Breakdown sections, in the order customers see them. */
+export const CATEGORY_LABELS: [LineCategory, string][] = [
+  ["rooms", "Main room painting"],
+  ["ceilings", "Ceiling painting"],
+  ["skirting", "Skirting boards"],
+  ["door_frames", "Door frames"],
+  ["windows", "Window frames/sills"],
+  ["radiators", "Radiators"],
+  ["feature_walls", "Feature walls"],
+  ["interior_doors", "Interior doors"],
+  ["woodwork", "Other woodwork"],
+];
+
+export function groupLines(lines: QuoteLine[]): { category: LineCategory; label: string; lines: QuoteLine[]; subtotalPence: number; hasManual: boolean }[] {
+  return CATEGORY_LABELS.map(([category, label]) => {
+    const group = lines.filter((l) => l.category === category);
+    return {
+      category,
+      label,
+      lines: group,
+      subtotalPence: group.reduce((s, l) => s + (l.amountPence ?? 0), 0),
+      hasManual: group.some((l) => l.status === "manual"),
+    };
+  }).filter((g) => g.lines.length > 0);
+}
 
 export const ESTIMATE_STATEMENT =
   "This is an initial labour-only estimate based on your measurements and selected services. Your photographs will be reviewed before your final fixed quotation is confirmed.";
@@ -15,28 +42,28 @@ export function QuoteBreakdown({ quote, showWorking = true, title = "Your painti
       <div className="bg-ink-950 px-6 py-4">
         <h3 className="font-sans text-sm font-semibold uppercase tracking-[0.16em] text-brand-300">{title}</h3>
       </div>
-      <dl className="divide-y divide-ink-900/8 px-6">
-        {quote.lines.map((line, i) => (
-          <div key={`${line.itemId}-${line.kind}-${i}`} className="flex items-start justify-between gap-4 py-4">
-            <dt>
-              <span className="block text-[15px] font-medium text-ink-950">
-                {line.label}
-                {line.kind === "ceiling" && <span className="font-normal text-ink-600"> (optional extra)</span>}
-              </span>
-              {showWorking && (
-                <span className="mt-0.5 block text-sm text-ink-600">
-                  {line.quantity.toFixed(2)} {line.unit} × {formatPence(line.ratePence, { alwaysShowPence: true })} = {formatPence(line.calculatedPence, { alwaysShowPence: true })}
-                  {line.minimumApplied && line.status === "priced" && <> · minimum charge {formatPence(line.minimumPence)} applies</>}
-                </span>
-              )}
-            </dt>
-            <dd className="shrink-0 text-right">
-              {line.status === "manual" ? (
-                <span className="inline-block rounded bg-brand-50 px-2 py-1 text-xs font-semibold text-brand-900">Manual quote</span>
-              ) : (
-                <span className="font-semibold text-ink-950">{formatPence(line.amountPence!)}</span>
-              )}
-            </dd>
+      <dl className="px-6">
+        {groupLines(quote.lines).map((group) => (
+          <div key={group.category} className="border-b border-ink-900/8 py-3">
+            <div className="flex items-baseline justify-between gap-4 pb-1">
+              <dt className="text-xs font-bold uppercase tracking-[0.12em] text-ink-700">{group.label}</dt>
+              {group.lines.length > 1 && group.subtotalPence > 0 && <dd className="text-xs font-semibold text-ink-700">Subtotal {money(group.subtotalPence)}</dd>}
+            </div>
+            {group.lines.map((line, i) => (
+              <div key={`${line.itemId}-${line.kind}-${i}`} className="flex items-start justify-between gap-4 py-2">
+                <dt>
+                  <span className="block text-[15px] font-medium text-ink-950">{line.label}</span>
+                  {showWorking && line.status === "priced" && <span className="mt-0.5 block text-sm text-ink-600">{lineWorking(line)}</span>}
+                </dt>
+                <dd className="shrink-0 text-right">
+                  {line.status === "manual" ? (
+                    <span className="inline-block max-w-[11rem] rounded bg-brand-50 px-2 py-1 text-xs font-semibold leading-snug text-brand-900">{INSPECTION_MESSAGE}</span>
+                  ) : (
+                    <span className="font-semibold text-ink-950">{money(line.amountPence!)}</span>
+                  )}
+                </dd>
+              </div>
+            ))}
           </div>
         ))}
         {quote.roundingAdjustmentPence !== 0 && (
@@ -44,13 +71,13 @@ export function QuoteBreakdown({ quote, showWorking = true, title = "Your painti
             <dt>Rounding adjustment</dt>
             <dd>
               {quote.roundingAdjustmentPence > 0 ? "+" : "−"}
-              {formatPence(Math.abs(quote.roundingAdjustmentPence), { alwaysShowPence: true })}
+              {money(Math.abs(quote.roundingAdjustmentPence))}
             </dd>
           </div>
         )}
         <div className="flex items-baseline justify-between gap-4 py-5">
           <dt className="font-semibold uppercase tracking-wide text-ink-950">Total estimated labour</dt>
-          <dd className="text-4xl font-extrabold tracking-tight text-brand-600">{quote.hasPricedItems ? formatPence(quote.totalPence) : "To be quoted"}</dd>
+          <dd className="text-right text-4xl font-extrabold tracking-tight text-brand-600">{quote.hasPricedItems ? money(quote.totalPence) : <span className="text-xl">{INSPECTION_MESSAGE}</span>}</dd>
         </div>
         <div className="flex justify-between gap-4 py-3 text-[15px]">
           <dt className="text-ink-800">Paint and materials</dt>
@@ -64,7 +91,7 @@ export function QuoteBreakdown({ quote, showWorking = true, title = "Your painti
             <p className="flex gap-2 text-sm text-brand-900">
               <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
               <span>
-                <strong>Some items need a manual quotation.</strong> They aren&rsquo;t included in the total above – we&rsquo;ll price them after reviewing your photos.
+                <strong>Some items need an inspection and a separate quotation.</strong> They aren&rsquo;t included in the total above – we&rsquo;ll price them after reviewing your photos or visiting.
               </span>
             </p>
           )}

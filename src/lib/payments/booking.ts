@@ -21,6 +21,15 @@ export function bookingStatusLabel(status: string): string {
   return BOOKING_STATUSES.find((s) => s.id === status)?.label ?? status;
 }
 
+/**
+ * Status after a VERIFIED Stripe payment. Full payment confirms the booking
+ * straight away; an older part-payment (deposit) is "Payment received" and
+ * the booking is confirmed by hand.
+ */
+export function statusAfterVerifiedPayment(paymentType: string | null | undefined): BookingStatus {
+  return paymentType === "full" ? "booking_confirmed" : "deposit_paid";
+}
+
 /** Statuses that require a verified deposit. */
 export const PAID_STATUSES: BookingStatus[] = ["deposit_paid", "booking_confirmed", "work_completed", "balance_paid"];
 
@@ -30,12 +39,13 @@ export const PAID_STATUSES: BookingStatus[] = ["deposit_paid", "booking_confirme
  * price and payment link always exist), and "Deposit paid" is ONLY ever set by
  * the verified Stripe webhook.
  */
-export function manualStatusOptions(b: { status: string; depositPaid: boolean }): BookingStatus[] {
+export function manualStatusOptions(b: { status: string; depositPaid: boolean; balanceDue?: boolean }): BookingStatus[] {
   const options = new Set<BookingStatus>([b.status as BookingStatus]);
   if (b.depositPaid) {
     options.add("booking_confirmed");
     options.add("work_completed");
-    options.add("balance_paid");
+    // "Balance paid" only makes sense if something is still owed (older deposit bookings)
+    if (b.balanceDue !== false) options.add("balance_paid");
     options.add("cancelled");
   } else {
     options.add("awaiting_consultation");
@@ -45,7 +55,7 @@ export function manualStatusOptions(b: { status: string; depositPaid: boolean })
   return BOOKING_STATUSES.map((s) => s.id).filter((id) => options.has(id));
 }
 
-export function canSetStatusManually(target: string, b: { status: string; depositPaid: boolean }): boolean {
+export function canSetStatusManually(target: string, b: { status: string; depositPaid: boolean; balanceDue?: boolean }): boolean {
   if (target === b.status) return true;
   return manualStatusOptions(b).includes(target as BookingStatus);
 }
@@ -80,7 +90,7 @@ export function decideDepositOutcome(enquiry: EnquiryPaymentState | null, paymen
   if (enquiry.depositPaidAt) return { action: "refund_duplicate", reason: "A deposit had already been paid for this booking" };
   if (payment.currency.toLowerCase() !== "gbp") return { action: "needs_review", reason: `Unexpected currency ${payment.currency}` };
   if (enquiry.depositPence === null || payment.amountPence !== enquiry.depositPence) {
-    return { action: "needs_review", reason: `Amount paid (${payment.amountPence}p) does not match the deposit due (${enquiry.depositPence ?? "none"}p)` };
+    return { action: "needs_review", reason: `Amount paid (${payment.amountPence}p) does not match the amount due (${enquiry.depositPence ?? "none"}p)` };
   }
   if (enquiry.status !== "deposit_requested") return { action: "needs_review", reason: `Booking was "${bookingStatusLabel(enquiry.status)}" when the payment arrived` };
   return { action: "mark_paid" };

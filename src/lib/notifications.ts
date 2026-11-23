@@ -30,7 +30,7 @@ export async function sendNotification(subject: string, lines: string[]): Promis
   return sendEmail(process.env.NOTIFICATION_EMAIL_TO!.split(",").map((s) => s.trim()), subject, lines);
 }
 
-/** Email a CUSTOMER – payment links and deposit confirmations. Replies go to your NOTIFICATION_EMAIL_TO address. */
+/** Email a CUSTOMER – payment links and payment confirmations. Replies go to your NOTIFICATION_EMAIL_TO address. */
 export async function sendCustomerEmail(
   to: string,
   subject: string,

@@ -4,6 +4,8 @@ import { CheckCircle2, CreditCard, Lock, ShieldCheck } from "lucide-react";
 import type { PaymentBooking } from "@/lib/payments/booking-server";
 import { formatPence } from "@/lib/pricing/engine";
 import { paymentLabel } from "@/lib/payments/deposit";
+import { CancellationSummary } from "@/components/CancellationPolicy";
+import { COOLING_OFF_DAYS } from "@/config/cancellation";
 
 /** The booking/payment summary (separate so it's easy to restyle). */
 export function BookingSummary({
@@ -30,6 +32,7 @@ export function BookingSummary({
   const alreadyPaid = Boolean(booking.depositPaidAt);
   const label = paymentLabel(booking.paymentType, booking.depositPercent);
   const isDeposit = booking.paymentType === "deposit";
+  const isFull = booking.paymentType === "full";
 
   return (
     <div className="mx-auto max-w-3xl px-5 py-10 sm:py-14">
@@ -42,8 +45,8 @@ export function BookingSummary({
           <Row label="Customer" value={booking.fullName} />
           <Row label="Agreed painting service" value={booking.agreedService} />
           <Row label="Agreed job price" value={formatPence(booking.agreedPricePence)} strong />
-          <Row label={label} value={formatPence(booking.depositPence)} strong />
-          <Row label="Remaining balance" value={formatPence(balancePence)} note={balancePence > 0 ? "Paid separately, as agreed with you. It is never taken automatically." : "Nothing more to pay after this."} />
+          <Row label={label} value={formatPence(booking.depositPence)} strong note={isFull ? "100% of the agreed price. Paying this confirms your booking." : undefined} />
+          {balancePence > 0 && <Row label="Remaining balance" value={formatPence(balancePence)} note="Paid separately, as agreed with you. It is never taken automatically." />}
         </dl>
         <div className="flex items-center justify-between gap-4 bg-brand-600 px-5 py-5 text-white sm:px-6">
           <span className="text-sm font-bold uppercase tracking-wider">{alreadyPaid ? "Paid" : "Payment due today"}</span>
@@ -56,7 +59,7 @@ export function BookingSummary({
           <CheckCircle2 className="mt-0.5 size-6 shrink-0 text-brand-600" aria-hidden />
           <div>
             <p className="font-bold">Your payment has already been received – thank you.</p>
-            <p className="mt-1 text-black/70">Your booking is secured. There&rsquo;s nothing more to pay online.</p>
+            <p className="mt-1 text-black/70">Your booking is {isFull ? "confirmed" : "secured"}. There&rsquo;s nothing more to pay online.</p>
           </div>
         </div>
       ) : (
@@ -68,9 +71,26 @@ export function BookingSummary({
             </p>
           )}
           {stripeReady ? (
-            <form action={`/api/pay/${token}/checkout`} method="post" className="mt-8">
+            <form action={`/api/pay/${token}/checkout`} method="post" className="mt-8 space-y-4">
+              <div className="rounded-2xl border border-black/10 p-5 text-sm leading-relaxed text-black/75">
+                <p className="font-bold text-ink">Cancellations and refunds</p>
+                <div className="mt-2">
+                  <CancellationSummary />
+                </div>
+                <label className="mt-4 flex items-start gap-3 text-[15px] text-ink">
+                  <input type="checkbox" name="acceptTerms" required className="mt-1 size-4 shrink-0 accent-brand-600" />
+                  <span>I have read the cancellation and refund policy and the terms and conditions.</span>
+                </label>
+                <label className="mt-3 flex items-start gap-3 text-[15px] text-ink">
+                  <input type="checkbox" name="earlyStart" className="mt-1 size-4 shrink-0 accent-brand-600" />
+                  <span>
+                    <strong>Optional:</strong> I would like work to start within my {COOLING_OFF_DAYS}-day cooling-off period. I understand that if I then cancel, I will pay
+                    for work properly carried out up to that point, and that I lose the right to cancel once the work has been fully completed.
+                  </span>
+                </label>
+              </div>
               <button type="submit" className="flex h-16 w-full items-center justify-center gap-3 rounded-lg bg-ink text-lg font-extrabold uppercase tracking-wide text-white shadow-lg transition hover:bg-brand-700 focus-visible:outline-4 focus-visible:outline-brand-500">
-                <Lock className="size-5" aria-hidden /> Pay {formatPence(booking.depositPence)}{isDeposit ? " deposit" : ""}
+                <Lock className="size-5" aria-hidden /> Pay {formatPence(booking.depositPence)}{isDeposit ? " deposit" : ""} and confirm booking
               </button>
             </form>
           ) : (

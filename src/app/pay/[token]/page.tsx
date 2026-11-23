@@ -19,6 +19,7 @@ const ERRORS: Record<string, string> = {
   unavailable: "Online payment isn't available right now. Please call us and we'll help you pay.",
   stripe: "We couldn't open the secure payment page. Please try again in a moment, or call us.",
   busy: "Your payment page was just being prepared. Please press the button again.",
+  terms: "Please tick the box to confirm you've read the cancellation and refund policy.",
 };
 
 async function PaymentDetails({ params, searchParams }: Pick<PageProps<"/pay/[token]">, "params" | "searchParams">) {

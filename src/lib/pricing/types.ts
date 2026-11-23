@@ -7,7 +7,13 @@
  */
 
 export type RoomType = "bedroom" | "living_room";
-export type ItemType = RoomType | "skirting" | "ceiling";
+export type ItemType = RoomType | "skirting" | "ceiling" | "extra";
+
+/** Extras with a fixed price per item (set in /admin/settings). */
+export type FixedExtraKind = "door_frame" | "window_frame" | "radiator_standard" | "radiator_large" | "feature_wall" | "interior_door";
+/** Extras that always need an inspection and a separate quotation. */
+export type InspectionExtraKind = "sash_window" | "decorative_radiator" | "complex_woodwork" | "wallpaper_feature_wall";
+export type ExtraKind = FixedExtraKind | InspectionExtraKind;
 
 /** Labour prices. Every value is editable from /admin/settings. */
 export interface PricingSettings {
@@ -15,6 +21,8 @@ export interface PricingSettings {
   livingRoom: { ratePerSqm: number; minimumCharge: number };
   skirting: { ratePerMetre: number; minimumCharge: number };
   ceiling: { ratePerSqm: number; minimumCharge: number };
+  /** Fixed price in pounds for each extra item (e.g. £30 per door frame). */
+  extras: Record<FixedExtraKind, number>;
   /** Final total is rounded to the nearest multiple of this many pounds (e.g. 5). 0 = no rounding. */
   roundToNearest: number;
   /** Number of coats included in the standard price (normally 2). */
@@ -84,17 +92,39 @@ export interface CeilingItem {
   };
 }
 
-export type QuoteItem = PaintedRoomItem | SkirtingItem | CeilingItem;
+/** A counted extra, e.g. 3 door frames or 1 large radiator. */
+export interface ExtraItem {
+  id: string;
+  type: "extra";
+  label: string;
+  extra: ExtraKind;
+  quantity: number;
+}
 
-export type LineKind = "walls" | "ceiling" | "skirting";
+export type QuoteItem = PaintedRoomItem | SkirtingItem | CeilingItem | ExtraItem;
+
+export type LineKind = "walls" | "ceiling" | "skirting" | "extra";
+
+/** Groups used for the itemised breakdown. */
+export type LineCategory =
+  | "rooms"
+  | "ceilings"
+  | "skirting"
+  | "door_frames"
+  | "windows"
+  | "radiators"
+  | "feature_walls"
+  | "interior_doors"
+  | "woodwork";
 
 export interface QuoteLine {
   itemId: string;
   label: string;
   kind: LineKind;
-  /** Area (m²) or length (m), rounded to 2 decimal places. */
+  category: LineCategory;
+  /** Area (m²), length (m) – rounded to 2 decimal places – or a count of items ("each"). */
   quantity: number;
-  unit: "m²" | "m";
+  unit: "m²" | "m" | "each";
   ratePence: number;
   /** quantity × rate, before the minimum charge. */
   calculatedPence: number;

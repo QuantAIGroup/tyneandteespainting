@@ -7,10 +7,10 @@ import { Button } from "@/components/ui/Button";
 import { Select, Textarea } from "@/components/ui/Form";
 import { markContacted, saveEnquiryNotes, setEnquiryStatus, type ActionState } from "../../../actions";
 
-export function EnquiryActions({ id, status, depositPaid, contactedAt }: { id: string; status: string; depositPaid: boolean; contactedAt: string | null }) {
+export function EnquiryActions({ id, status, depositPaid, balanceDue, contactedAt }: { id: string; status: string; depositPaid: boolean; balanceDue: boolean; contactedAt: string | null }) {
   const [pending, startTransition] = useTransition();
   const [message, setMessage] = useState<ActionState>(null);
-  const options = manualStatusOptions({ status, depositPaid });
+  const options = manualStatusOptions({ status, depositPaid, balanceDue });
 
   const run = (fn: () => Promise<ActionState>) =>
     startTransition(async () => {

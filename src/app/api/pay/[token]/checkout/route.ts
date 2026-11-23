@@ -1,9 +1,10 @@
 /**
- * "PAY DEPOSIT" button → sends the customer to Stripe's secure checkout page.
+ * "PAY" button → sends the customer to Stripe's secure checkout page.
  *
- * The amount is read from the database using the secret link token. Nothing the
- * customer sends (other than which link they're on) is used, so the deposit
- * can't be altered.
+ * The amount is read from the database using the secret link token (100% of
+ * the agreed price). Nothing the customer sends can change it – the only things
+ * read from the form are the two cancellation-policy tick boxes, which are
+ * recorded on the booking.
  */
 import { NextResponse } from "next/server";
 import { getBookingByToken } from "@/lib/payments/booking-server";
@@ -15,7 +16,7 @@ import { SITE } from "@/config/site";
 
 const back = (token: string, query = "") => NextResponse.redirect(`${SITE.url}/pay/${token}${query}`, 303);
 
-export async function POST(_request: Request, ctx: RouteContext<"/api/pay/[token]/checkout">) {
+export async function POST(request: Request, ctx: RouteContext<"/api/pay/[token]/checkout">) {
   const { token } = await ctx.params;
   if (!isValidPaymentToken(token)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
@@ -27,6 +28,21 @@ export async function POST(_request: Request, ctx: RouteContext<"/api/pay/[token
   if (!booking) return back(token);
   if (booking.depositPaidAt) return NextResponse.redirect(`${SITE.url}/pay/${token}/success`, 303);
   if (booking.status !== "deposit_requested") return back(token);
+
+  // The customer must confirm they've read the cancellation and refund policy
+  const form = await request.formData().catch(() => null);
+  if (form?.get("acceptTerms") !== "on") return back(token, "?error=terms");
+  const earlyStart = form.get("earlyStart") === "on";
+  const now = new Date().toISOString();
+  const { error: consentError } = await supabase
+    .from("enquiries")
+    .update({ cancellation_terms_accepted_at: now, early_start_requested_at: earlyStart ? now : null })
+    .eq("id", booking.id)
+    .is("deposit_paid_at", null);
+  if (consentError) {
+    console.error("Could not record cancellation consent", consentError);
+    return back(token, "?error=stripe");
+  }
 
   try {
     // Re-use an open checkout page if there is one, so the customer can't end up paying twice

@@ -1,7 +1,10 @@
 "use server";
 
 /**
- * DEPOSIT ACTIONS (admin only)
+ * PAYMENT ACTIONS (admin only)
+ *
+ * Customers pay 100% of the final agreed price. A payment link is only ever
+ * created after you've confirmed you spoke to the customer and agreed the price.
  *
  * Payment fields are protected in the database so they can't be changed from a
  * browser login. These actions first check you are a logged-in admin, then use
@@ -11,11 +14,13 @@ import { refresh } from "next/cache";
 import { requireAdmin } from "@/lib/auth";
 import { isUuid } from "@/lib/enquiry";
 import { sendCustomerEmail } from "@/lib/notifications";
-import { calculatePaymentRequest, parsePoundsToPence, paymentLabel, type PaymentType } from "@/lib/payments/deposit";
+import { NEW_PAYMENT_TYPE, fullPaymentRequest, parsePoundsToPence } from "@/lib/payments/deposit";
+import { CANCELLATION_SUMMARY } from "@/config/cancellation";
+import { SITE } from "@/config/site";
 import { expireCheckoutSession, paymentLinkUrl } from "@/lib/payments/checkout";
 import { generatePaymentToken, getStripe } from "@/lib/payments/stripe";
 import { formatPence } from "@/lib/pricing/engine";
-import { getBusinessSettings, getPaymentSettings } from "@/lib/settings";
+import { getBusinessSettings } from "@/lib/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type PaymentActionState = { ok: boolean; message: string; link?: string } | null;
@@ -39,8 +44,8 @@ async function loadEnquiry(supabase: NonNullable<ReturnType<typeof createAdminCl
 
 /**
  * Step 1: after your phone call, approve the quotation – record the final
- * agreed price and what the customer should pay now (deposit, full or custom).
- * All amounts are worked out here on the server, in whole pence.
+ * agreed price. The customer will pay 100% of this agreed price (never the
+ * online estimate). The amount is worked out here on the server, in whole pence.
  */
 export async function agreeFinalPrice(id: string, _prev: PaymentActionState, formData: FormData): Promise<PaymentActionState> {
   if (!isUuid(id)) return { ok: false, message: "Invalid request" };
@@ -52,19 +57,10 @@ export async function agreeFinalPrice(id: string, _prev: PaymentActionState, for
   const pricePence = parsePoundsToPence(String(formData.get("agreedPrice") ?? ""));
   if (pricePence === null) return { ok: false, message: "Please enter a valid price, e.g. 400 or 425.50 (maximum £50,000)." };
 
-  const typeRaw = String(formData.get("paymentType") ?? "deposit");
-  if (!["deposit", "full", "custom"].includes(typeRaw)) return { ok: false, message: "Please choose what the customer should pay." };
-  const paymentType = typeRaw as PaymentType;
-  const { defaultDepositPercent } = await getPaymentSettings();
-  const percent = paymentType === "deposit" ? Number(String(formData.get("depositPercent") ?? defaultDepositPercent)) : undefined;
-  const customAmountPence = paymentType === "custom" ? parsePoundsToPence(String(formData.get("customAmount") ?? "")) : null;
-  const request = calculatePaymentRequest({ agreedPricePence: pricePence, type: paymentType, depositPercent: percent, customAmountPence });
-  if (!request) {
-    return {
-      ok: false,
-      message: paymentType === "custom" ? "The amount to pay must be more than £0 and no more than the agreed price." : "The deposit percentage must be a whole number from 1 to 100.",
-    };
-  }
+  // Always 100% of the agreed price – any payment type sent from the browser is ignored
+  const paymentType = NEW_PAYMENT_TYPE;
+  const request = fullPaymentRequest(pricePence);
+  if (!request) return { ok: false, message: "Please enter a valid price, e.g. 400 or 425.50 (maximum £50,000)." };
 
   const supabase = await serverDb();
   const enquiry = await loadEnquiry(supabase, id);
@@ -93,18 +89,17 @@ export async function agreeFinalPrice(id: string, _prev: PaymentActionState, for
   const { error } = await supabase.from("enquiries").update(patch).eq("id", id).is("deposit_paid_at", null);
   if (error) return { ok: false, message: error.message };
   refresh();
-  const what = `${paymentLabel(paymentType, request.depositPercent)}: ${formatPence(request.amountPence)}`;
   return {
     ok: true,
     message:
       changed && enquiry.status === "deposit_requested"
-        ? `Updated – ${formatPence(pricePence)} agreed, ${what}. The old payment link no longer works, so send the new one below.`
-        : `Quotation approved: ${formatPence(pricePence)} agreed. ${what}.`,
+        ? `Updated – ${formatPence(pricePence)} agreed (customer pays 100%). The old payment link no longer works, so send the new one below.`
+        : `Quotation approved: ${formatPence(pricePence)} agreed. The customer will pay the full ${formatPence(pricePence)}.`,
   };
 }
 
-/** Step 2: create (or resend) the secure 50% deposit payment link. */
-export async function sendDepositLink(id: string): Promise<PaymentActionState> {
+/** Step 2: create (or resend) the secure payment link for the full agreed price. */
+export async function sendPaymentLink(id: string): Promise<PaymentActionState> {
   if (!isUuid(id)) return { ok: false, message: "Invalid request" };
   const supabase = await serverDb();
   const enquiry = await loadEnquiry(supabase, id);
@@ -141,15 +136,19 @@ export async function sendDepositLink(id: string): Promise<PaymentActionState> {
       `Thank you for speaking with us. Here is your confirmed fixed labour price:`,
       `Work: ${enquiry.agreed_service}`,
       `Agreed job price: ${formatPence(enquiry.agreed_price_pence as number)}`,
-      `${paymentLabel(enquiry.payment_type as string, enquiry.deposit_percent as number | null)} due now: ${formatPence(enquiry.deposit_pence as number)}`,
+      `Amount to pay: ${formatPence(enquiry.deposit_pence as number)}${balance === 0 ? " (100% of the agreed price)" : ""}`,
       ...(balance > 0 ? [`Remaining balance: ${formatPence(balance)} (paid separately, as agreed – it is never charged automatically)`] : []),
+      `Your booking is confirmed as soon as your payment has been received.`,
+      `Cancellations and refunds:`,
+      ...CANCELLATION_SUMMARY.map((l) => `• ${l}`),
+      `Full details and the cancellation form: ${SITE.url}/cancellation`,
       process.env.STRIPE_WALLETS_ENABLED === "true"
         ? `You can pay securely by debit or credit card – or Apple Pay / Google Pay where your device supports it – using the button below.`
         : `You can pay securely by debit or credit card using the button below.`,
       `Any questions? Call us on ${business.phone}.`,
       `${business.name}`,
     ],
-    { label: `Pay ${formatPence(enquiry.deposit_pence as number)}${enquiry.payment_type === "deposit" ? " deposit" : ""}`, url: link },
+    { label: `Pay ${formatPence(enquiry.deposit_pence as number)}`, url: link },
   );
   refresh();
   return {
@@ -162,7 +161,7 @@ export async function sendDepositLink(id: string): Promise<PaymentActionState> {
 }
 
 /** Withdraw a payment link that hasn't been paid (e.g. the job was postponed). */
-export async function cancelDepositRequest(id: string): Promise<PaymentActionState> {
+export async function cancelPaymentRequest(id: string): Promise<PaymentActionState> {
   if (!isUuid(id)) return { ok: false, message: "Invalid request" };
   const supabase = await serverDb();
   const enquiry = await loadEnquiry(supabase, id);
@@ -179,7 +178,11 @@ export async function cancelDepositRequest(id: string): Promise<PaymentActionSta
   return { ok: true, message: "Payment link withdrawn. The old link no longer works." };
 }
 
-/** The remaining balance is collected separately (never charged automatically). Record it here once received. */
+/**
+ * Older deposit bookings only: the remaining balance is collected separately
+ * (never charged automatically). Record it here once received. Not used for
+ * full payments, where nothing remains to pay.
+ */
 export async function recordBalancePaid(id: string, _prev: PaymentActionState, formData: FormData): Promise<PaymentActionState> {
   if (!isUuid(id)) return { ok: false, message: "Invalid request" };
   const note = String(formData.get("note") ?? "").trim();

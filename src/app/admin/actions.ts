@@ -11,6 +11,7 @@ import { z } from "zod";
 import { requireAdmin } from "@/lib/auth";
 import { isUuid } from "@/lib/enquiry";
 import { canSetStatusManually } from "@/lib/payments/booking";
+import { FIXED_EXTRAS } from "@/lib/pricing/extras";
 import { pricingSettingsSchema } from "@/lib/pricing/schema";
 import { GALLERY_TAG, SETTINGS_TAG } from "@/lib/settings";
 import { createSessionClient } from "@/lib/supabase/server";
@@ -27,22 +28,26 @@ async function db() {
 // ---------------- Enquiries ----------------
 
 /**
- * Change the booking status from the status menu. "Deposit paid" can never be
- * chosen here – only a verified Stripe payment sets it – and a booking can't be
- * confirmed/completed until the deposit is paid (the database enforces this too).
+ * Change the booking status from the status menu. "Payment received" can never
+ * be chosen here – only a verified Stripe payment sets it – and a booking can't
+ * be confirmed/completed until payment is received (the database enforces this too).
  */
 export async function setEnquiryStatus(id: string, status: string): Promise<ActionState> {
   if (!isUuid(id)) return { ok: false, message: "Invalid request" };
   const supabase = await db();
-  const { data: current } = await supabase.from("enquiries").select("status, deposit_paid_at").eq("id", id).maybeSingle();
+  const { data: current } = await supabase.from("enquiries").select("status, deposit_paid_at, deposit_paid_pence, agreed_price_pence").eq("id", id).maybeSingle();
   if (!current) return { ok: false, message: "Enquiry not found" };
-  const state = { status: current.status as string, depositPaid: Boolean(current.deposit_paid_at) };
+  const state = {
+    status: current.status as string,
+    depositPaid: Boolean(current.deposit_paid_at),
+    balanceDue: ((current.agreed_price_pence as number | null) ?? 0) > ((current.deposit_paid_pence as number | null) ?? 0),
+  };
   if (!canSetStatusManually(status, state)) {
     return {
       ok: false,
       message: state.depositPaid
         ? "That status isn't available for a paid booking."
-        : "Use 'Agree final price' and 'Send deposit link' – bookings can only be confirmed after a verified deposit payment.",
+        : "Use 'Agree final price' and 'Send payment link' – bookings can only be confirmed after a verified payment.",
     };
   }
   const now = new Date().toISOString();
@@ -99,6 +104,7 @@ export async function savePricing(_prev: ActionState, formData: FormData): Promi
     livingRoom: { ratePerSqm: num(formData, "livingRoom.ratePerSqm"), minimumCharge: num(formData, "livingRoom.minimumCharge") },
     skirting: { ratePerMetre: num(formData, "skirting.ratePerMetre"), minimumCharge: num(formData, "skirting.minimumCharge") },
     ceiling: { ratePerSqm: num(formData, "ceiling.ratePerSqm"), minimumCharge: num(formData, "ceiling.minimumCharge") },
+    extras: Object.fromEntries(FIXED_EXTRAS.map((k) => [k, num(formData, `extras.${k}`)])),
     roundToNearest: num(formData, "roundToNearest"),
     standardCoats: num(formData, "standardCoats"),
   });
@@ -139,16 +145,6 @@ export async function saveBusiness(_prev: ActionState, formData: FormData): Prom
   if (error) return { ok: false, message: error.message };
   updateTag(SETTINGS_TAG);
   return { ok: true, message: "Business details saved and updated across the website." };
-}
-
-export async function savePaymentSettings(_prev: ActionState, formData: FormData): Promise<ActionState> {
-  const pct = Number(String(formData.get("defaultDepositPercent") ?? "").trim());
-  if (!Number.isInteger(pct) || pct < 1 || pct > 100) return { ok: false, message: "Deposit percentage must be a whole number from 1 to 100." };
-  const supabase = await db();
-  const { error } = await supabase.from("settings").upsert({ key: "payments", value: { defaultDepositPercent: pct } });
-  if (error) return { ok: false, message: error.message };
-  updateTag(SETTINGS_TAG);
-  return { ok: true, message: `Default deposit set to ${pct}%. This applies to new payment requests.` };
 }
 
 // ---------------- Gallery ----------------

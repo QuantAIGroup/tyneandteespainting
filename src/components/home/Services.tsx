@@ -15,7 +15,10 @@ export function startingPrice(service: ServiceInfo, pricing: PricingSettings): {
     case "living_room":
       return { from: formatPounds(pricing.livingRoom.minimumCharge), detail: `per living room · ${formatPounds(pricing.livingRoom.ratePerSqm)} per m² of wall` };
     case "skirting":
-      return { from: formatPounds(pricing.skirting.minimumCharge), detail: `${formatPounds(pricing.skirting.ratePerMetre)} per linear metre` };
+      // No minimum charge: show the rate per metre as the starting price
+      return pricing.skirting.minimumCharge > 0
+        ? { from: formatPounds(pricing.skirting.minimumCharge), detail: `${formatPounds(pricing.skirting.ratePerMetre)} per linear metre` }
+        : { from: formatPounds(pricing.skirting.ratePerMetre), detail: "per linear metre" };
     case "ceiling":
       return { from: formatPounds(pricing.ceiling.minimumCharge), detail: `${formatPounds(pricing.ceiling.ratePerSqm)} per m² of ceiling` };
   }

@@ -1,6 +1,6 @@
 "use client";
 
-import type { CeilingDraft, ItemDraft, RoomDraft, SkirtingDraft } from "./draft";
+import type { CeilingDraft, MeasuredDraft, RoomDraft, SkirtingDraft } from "./draft";
 
 /**
  * Quick condition questions. They decide whether an item can be priced
@@ -91,7 +91,7 @@ function CeilingCondition({ item, update }: { item: CeilingDraft; update: (p: Pa
   );
 }
 
-export function ItemCondition({ item, update }: { item: ItemDraft; update: (p: Partial<ItemDraft>) => void }) {
+export function ItemCondition({ item, update }: { item: MeasuredDraft; update: (p: Partial<MeasuredDraft>) => void }) {
   if (item.type === "skirting") return <SkirtingCondition item={item} update={update} />;
   if (item.type === "ceiling") return <CeilingCondition item={item} update={update} />;
   return <RoomCondition item={item} update={update} />;

@@ -3,6 +3,7 @@ import type Stripe from "stripe";
 import { SITE } from "@/config/site";
 import { formatPence } from "@/lib/pricing/engine";
 import { paymentLabel, type PaymentType } from "./deposit";
+import { CANCELLATION_SUMMARY } from "@/config/cancellation";
 
 export function paymentLinkUrl(token: string): string {
   return `${SITE.url}/pay/${token}`;
@@ -78,6 +79,12 @@ export async function createDepositCheckout(stripe: Stripe, input: DepositChecko
         // Stripe emails the customer a receipt (switch on in Stripe → Settings → Customer emails)
         receipt_email: input.customerEmail,
         metadata,
+      },
+      // Shown on Stripe's payment page, next to the Pay button
+      custom_text: {
+        submit: {
+          message: `${input.paymentType === "full" ? "Paying confirms your booking. " : ""}Cancellations & refunds: ${CANCELLATION_SUMMARY.join(" ")} Full policy and cancellation form: ${SITE.url}/cancellation`.slice(0, 1200),
+        },
       },
       success_url: `${SITE.url}/pay/${input.token}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${SITE.url}/pay/${input.token}/cancelled`,

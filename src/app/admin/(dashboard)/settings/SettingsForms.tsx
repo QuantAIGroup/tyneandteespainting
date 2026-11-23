@@ -2,10 +2,11 @@
 
 import { useActionState } from "react";
 import type { BusinessSettings } from "@/config/site";
+import { EXTRAS, FIXED_EXTRAS } from "@/lib/pricing/extras";
 import type { PricingSettings } from "@/lib/pricing/types";
 import { Button } from "@/components/ui/Button";
 import { Alert, Field, Input, Textarea } from "@/components/ui/Form";
-import { saveBusiness, savePaymentSettings, savePricing } from "../../actions";
+import { saveBusiness, savePricing } from "../../actions";
 
 function MoneyInput({ name, label, defaultValue, suffix }: { name: string; label: string; defaultValue: number; suffix?: string }) {
   return (
@@ -43,8 +44,17 @@ export function PricingForm({ pricing }: { pricing: PricingSettings }) {
           </fieldset>
         ))}
       </div>
+      <fieldset className="mt-6 rounded-lg bg-grey-50/70 p-4">
+        <legend className="px-1 font-medium text-ink-950">Extras (fixed price each)</legend>
+        <div className="mt-2 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {FIXED_EXTRAS.map((k) => (
+            <MoneyInput key={k} name={`extras.${k}`} label={EXTRAS[k].name} defaultValue={pricing.extras[k]} suffix="each" />
+          ))}
+        </div>
+        <p className="mt-3 text-sm text-ink-600">Sash windows, decorative radiators, complex woodwork and wallpapered feature walls always show &ldquo;Inspection and separate quotation required&rdquo;.</p>
+      </fieldset>
       <div className="mt-6 grid gap-4 sm:grid-cols-2 md:max-w-xl">
-        <MoneyInput name="roundToNearest" label="Round final total to the nearest" defaultValue={pricing.roundToNearest} />
+        <MoneyInput name="roundToNearest" label="Round final total to the nearest (0 = exact total)" defaultValue={pricing.roundToNearest} />
         <Field label="Coats included as standard" htmlFor="standardCoats" hint="Requests for more coats are flagged for review.">
           <Input id="standardCoats" name="standardCoats" type="number" min={1} max={5} step={1} required defaultValue={pricing.standardCoats} />
         </Field>
@@ -97,32 +107,6 @@ export function BusinessForm({ business }: { business: BusinessSettings }) {
       <div className="mt-6 flex flex-wrap items-center gap-4">
         <Button type="submit" disabled={pending}>
           {pending ? "Saving…" : "Save business details"}
-        </Button>
-        {state && <Alert tone={state.ok ? "success" : "error"}>{state.message}</Alert>}
-      </div>
-    </form>
-  );
-}
-
-export function PaymentSettingsForm({ defaultDepositPercent }: { defaultDepositPercent: number }) {
-  const [state, action, pending] = useActionState(savePaymentSettings, null);
-  return (
-    <form action={action} className="rounded-xl bg-white p-6 ring-1 ring-ink-950/10">
-      <h2 className="font-sans text-lg font-semibold">Payment requests</h2>
-      <p className="mt-1 text-sm text-ink-600">
-        When you agree a price with a customer you can ask for a deposit, full payment or any amount you choose. This sets the usual deposit percentage.
-      </p>
-      <div className="mt-5 max-w-xs">
-        <Field label="Default booking deposit" htmlFor="defaultDepositPercent" hint="1 to 100. For example 50 = half the agreed price.">
-          <div className="relative">
-            <Input id="defaultDepositPercent" name="defaultDepositPercent" type="number" min={1} max={100} step={1} required defaultValue={defaultDepositPercent} />
-            <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-ink-600">%</span>
-          </div>
-        </Field>
-      </div>
-      <div className="mt-6 flex flex-wrap items-center gap-4">
-        <Button type="submit" disabled={pending}>
-          {pending ? "Saving…" : "Save payment settings"}
         </Button>
         {state && <Alert tone={state.ok ? "success" : "error"}>{state.message}</Alert>}
       </div>

@@ -5,6 +5,7 @@ import { ArrowLeft, Mail, MapPin, Phone } from "lucide-react";
 import { requireAdmin } from "@/lib/auth";
 import { isUuid } from "@/lib/enquiry";
 import { ceilingArea, roomWallArea } from "@/lib/pricing/engine";
+import { EXTRAS, INSPECTION_MESSAGE, describeQuantity } from "@/lib/pricing/extras";
 import type { PricingSettings, QuoteItem, QuoteResult } from "@/lib/pricing/types";
 import { createSessionClient } from "@/lib/supabase/server";
 import { QuoteBreakdown } from "@/components/calculator/QuoteBreakdown";
@@ -34,13 +35,17 @@ function ItemDetails({ item }: { item: QuoteItem }) {
   } else if (item.type === "skirting") {
     rows.push(["Length", m(item.linearMetres)]);
     rows.push(["Condition", SURFACE[item.condition]]);
-  } else {
+  } else if (item.type === "ceiling") {
     rows.push(["Measurements", `${m(item.length)} × ${m(item.width)} = ${ceilingArea(item.length, item.width).toFixed(2)} m²`]);
     rows.push(["Condition", SURFACE[item.condition.surface]]);
     rows.push(["Newly plastered", yesNo(item.condition.newlySkimmed)]);
     rows.push(["Damp / stains", yesNo(item.condition.dampOrStains)]);
+  } else if (item.type === "extra") {
+    rows.push(["Service", EXTRAS[item.extra].name]);
+    rows.push(["Quantity", describeQuantity(item.extra, item.quantity)]);
+    if (EXTRAS[item.extra].inspection) rows.push(["Price", INSPECTION_MESSAGE]);
   }
-  rows.push(["Coats", String(item.coats)]);
+  if (item.type !== "extra") rows.push(["Coats", String(item.coats)]);
 
   return (
     <div className="rounded-lg bg-white p-5 ring-1 ring-ink-900/10">
@@ -93,7 +98,7 @@ export default async function EnquiryPage({ params }: PageProps<"/admin/enquirie
       <p className="mt-1 text-ink-600">Received {created}</p>
 
       <div className="mt-6">
-        <EnquiryActions id={id} status={enquiry.status as string} depositPaid={Boolean(enquiry.deposit_paid_at)} contactedAt={(enquiry.contacted_at as string | null) ?? null} />
+        <EnquiryActions id={id} status={enquiry.status as string} depositPaid={Boolean(enquiry.deposit_paid_at)} balanceDue={((enquiry.agreed_price_pence as number | null) ?? 0) > ((enquiry.deposit_paid_pence as number | null) ?? 0)} contactedAt={(enquiry.contacted_at as string | null) ?? null} />
       </div>
 
       <div className="mt-8 grid gap-8 lg:grid-cols-[1fr_400px]">

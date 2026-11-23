@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { connection } from "next/server";
 import { Suspense } from "react";
 import { CheckCircle2, Loader2, Phone } from "lucide-react";
@@ -10,7 +11,7 @@ import { AutoRefresh } from "./AutoRefresh";
 
 /**
  * Shown after Stripe checkout. The thank-you message ONLY appears once our
- * database says the deposit is paid – which only the verified webhook can set.
+ * database says the payment is received – which only the verified webhook can set.
  * Until then we show "confirming…" and check again every few seconds.
  */
 export default function SuccessPage({ params }: PageProps<"/pay/[token]/success">) {
@@ -36,7 +37,7 @@ async function SuccessDetails({ params }: Pick<PageProps<"/pay/[token]/success">
         </span>
         <h1 className="mt-6 font-sans text-3xl font-extrabold tracking-tight sm:text-4xl">{paidHeadline(booking.paymentType, booking.depositPercent)}</h1>
         <p className="mt-5 text-lg text-black/75">
-          Your painting booking is now secured. {business.name} will contact you to confirm the arrangements for your job.
+          Your painting booking is now {booking.paymentType === "full" ? "confirmed" : "secured"}. {business.name} will contact you to confirm the arrangements for your job.
         </p>
         <p className="mt-3 text-lg font-semibold">Thank you for choosing {business.name}.</p>
 
@@ -53,10 +54,12 @@ async function SuccessDetails({ params }: Pick<PageProps<"/pay/[token]/success">
             <dt className="text-black/60">Paid today</dt>
             <dd className="font-semibold text-brand-700">{formatPence(booking.depositPaidPence ?? booking.depositPence)}</dd>
           </div>
-          <div className="flex justify-between px-5 py-3">
-            <dt className="text-black/60">Remaining balance</dt>
-            <dd className="font-semibold">{formatPence(balance)}</dd>
-          </div>
+          {balance > 0 && (
+            <div className="flex justify-between px-5 py-3">
+              <dt className="text-black/60">Remaining balance</dt>
+              <dd className="font-semibold">{formatPence(balance)}</dd>
+            </div>
+          )}
           {booking.stripePaymentIntentId && (
             <div className="flex justify-between gap-4 px-5 py-3">
               <dt className="text-black/60">Payment reference</dt>
@@ -72,6 +75,13 @@ async function SuccessDetails({ params }: Pick<PageProps<"/pay/[token]/success">
           </p>
         )}
         {balance > 0 && <p className="mt-4 text-sm text-black/60">The remaining balance is paid separately as agreed – it will not be taken automatically.</p>}
+        <p className="mt-6 text-sm text-black/60">
+          Need to cancel? See our{" "}
+          <Link href="/cancellation" className="font-semibold underline">
+            cancellations and refunds
+          </Link>{" "}
+          page, including your 14-day cooling-off rights and the cancellation form.
+        </p>
       </div>
     );
   }
