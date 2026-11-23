@@ -217,6 +217,13 @@ describe("Stripe webhook – 100% payments", () => {
     expect(db.table("payments")).toHaveLength(1);
   });
 
+  it("the same event arriving twice at the same moment confirms the booking once", async () => {
+    await Promise.all([send(event({})), send(event({}))]);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "booking_confirmed", deposit_paid_pence: 37550 });
+    expect(db.table("payments")).toHaveLength(1);
+    expect(emails.filter((m) => m.to === "sam@example.com")).toHaveLength(1);
+  });
+
   it("automatically refunds a second, duplicate payment", async () => {
     await send(event({}));
     await send(event({ id: "evt_2", pi: "pi_2" }));
