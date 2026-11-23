@@ -5,12 +5,22 @@
 \pset tuples_only on
 \pset format unaligned
 
+-- Runs the statement AS the real database role named in the claims (service_role,
+-- authenticated or anon), exactly as Supabase does. Empty claims = the database owner.
+create or replace function pg_temp.become(claims text) returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claims', claims, true);
+  if claims <> '' and (claims::jsonb ->> 'role') in ('service_role', 'authenticated', 'anon') then
+    execute format('set local role %I', claims::jsonb ->> 'role');
+  end if;
+end $$;
+
 create or replace function pg_temp.expect_reject(label text, stmt text, claims text default '{"role":"service_role"}') returns text language plpgsql as $$
 begin
   begin
-    perform set_config('request.jwt.claims', claims, true);
+    perform pg_temp.become(claims);
     execute stmt;
-  exception when check_violation or not_null_violation or unique_violation or raise_exception then
+  exception when check_violation or not_null_violation or unique_violation or raise_exception or insufficient_privilege then
     return 'PASS  rejected: ' || label || '  [' || sqlerrm || ']';
   end;
   raise exception 'FAIL  accepted but should be rejected: %', label;
@@ -18,8 +28,9 @@ end $$;
 
 create or replace function pg_temp.expect_ok(label text, stmt text, claims text default '{"role":"service_role"}') returns text language plpgsql as $$
 begin
-  perform set_config('request.jwt.claims', claims, true);
+  perform pg_temp.become(claims);
   execute stmt;
+  reset role;
   return 'PASS  accepted: ' || label;
 end $$;
 
@@ -45,12 +56,18 @@ select case when value->'skirting'->>'ratePerMetre' = '6.25'
 -- ---------------------------------------------------------------- rules exist once, exactly as written
 select case when count(*) = 7 then 'PASS  each of the 7 rules exists exactly once after two runs' else 'FAIL  rule count ' || count(*) end
 from pg_constraint where conname in ('enquiries_full_payment_only', 'enquiries_full_payment_amount', 'enquiries_paid_in_full', 'enquiries_payment_needs_consent', 'enquiries_early_start_needs_terms', 'quote_rooms_item_type_check', 'quote_rooms_extra_shape_check');
-select case when count(*) = 1 then 'PASS  paid-booking delete protection trigger exists once' else 'FAIL  delete trigger count ' || count(*) end
-from pg_trigger where tgrelid = 'public.enquiries'::regclass and tgname = 'enquiries_prevent_paid_delete';
-select case when not p.prosecdef and pg_get_userbyid(p.proowner) = 'postgres' and p.proconfig = array['search_path=""'] and p.proacl::text = '{postgres=X/postgres}'
-  then 'PASS  prevent_paid_enquiry_delete: SECURITY INVOKER, owner postgres, search_path "", owner-only execute'
-  else 'FAIL  delete function properties' end
-from pg_proc p where p.oid = 'public.prevent_paid_enquiry_delete()'::regprocedure;
+select case when count(*) = 3 then 'PASS  triggers attached exactly as intended: payment lock BEFORE UPDATE FOR EACH ROW, delete guard BEFORE DELETE FOR EACH ROW, truncate guard BEFORE TRUNCATE FOR EACH STATEMENT – all enabled'
+  else 'FAIL  trigger configuration' end
+from pg_trigger t where t.tgrelid = 'public.enquiries'::regclass and t.tgenabled = 'O' and (
+     (t.tgname = 'enquiries_protect_payment' and t.tgtype = 19 and t.tgfoid = 'public.protect_payment_fields()'::regprocedure)
+  or (t.tgname = 'enquiries_prevent_paid_delete' and t.tgtype = 11 and t.tgfoid = 'public.prevent_paid_enquiry_delete()'::regprocedure)
+  or (t.tgname = 'enquiries_prevent_paid_truncate' and t.tgtype = 34 and t.tgfoid = 'public.prevent_paid_enquiry_truncate()'::regprocedure));
+select case when (select count(*) from pg_trigger where tgrelid = 'public.enquiries'::regclass and not tgisinternal) = 4
+  then 'PASS  no duplicate or stray triggers on enquiries (3 protective + the existing updated_at trigger)' else 'FAIL  unexpected triggers' end;
+select case when count(*) = 2 then 'PASS  delete and truncate guard functions: SECURITY INVOKER, owner postgres, search_path "", owner-only execute'
+  else 'FAIL  guard function properties' end
+from pg_proc p where p.oid in ('public.prevent_paid_enquiry_delete()'::regprocedure, 'public.prevent_paid_enquiry_truncate()'::regprocedure)
+  and not p.prosecdef and pg_get_userbyid(p.proowner) = 'postgres' and p.proconfig = array['search_path=""'] and p.proacl::text = '{postgres=X/postgres}';
 
 -- ---------------------------------------------------------------- security preserved
 select case when not p.prosecdef and pg_get_userbyid(p.proowner) = 'postgres' and p.proconfig = array['search_path=""'] and p.proacl::text = '{postgres=X/postgres}'
@@ -101,6 +118,9 @@ select pg_temp.expect_reject('unit price over £10,000', $q$insert into public.q
 select pg_temp.expect_ok('largest allowed extra: 50 × £10,000 = £500,000 (BIGINT maths)', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, unit_price_pence, estimated_labour_pence) values ('11111111-1111-4111-a111-111111111111', 49, 'extra', 'X', 'door_frame', 50, 1000000, 50000000)$q$);
 select pg_temp.expect_reject('a total that would overflow a normal integer', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, extra_kind, quantity, unit_price_pence, estimated_labour_pence) values ('11111111-1111-4111-a111-111111111111', 50, 'extra', 'X', 'door_frame', 50, 2147483647, 2147483647)$q$);
 select pg_temp.expect_reject('room estimate over £1,000,000', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition, estimated_labour_pence) values ('11111111-1111-4111-a111-111111111111', 51, 'bedroom', 'X', 2, '{}', 100000001)$q$);
+select pg_temp.expect_ok('measured room needing a manual quote (e.g. wallpaper): flag on, no price', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition, requires_manual_quote) values ('11111111-1111-4111-a111-111111111111', 52, 'living_room', 'Wallpapered lounge', 2, '{"wallpaperToRemove":true}', true)$q$);
+select pg_temp.expect_reject('priced measured room flagged as needing a manual quote', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition, estimated_labour_pence, requires_manual_quote) values ('11111111-1111-4111-a111-111111111111', 53, 'bedroom', 'X', 2, '{}', 19800, true)$q$);
+select pg_temp.expect_reject('measured room with no price but not flagged for a manual quote', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition, requires_manual_quote) values ('11111111-1111-4111-a111-111111111111', 54, 'bedroom', 'X', 2, '{}', false)$q$);
 select pg_temp.expect_reject('NULL item type', $q$insert into public.quote_rooms (enquiry_id, position, item_type, label, coats, condition) values ('11111111-1111-4111-a111-111111111111', 37, null, 'X', 2, '{}')$q$);
 
 -- ---------------------------------------------------------------- payments: only exactly 100%
@@ -139,6 +159,9 @@ select pg_temp.expect_ok('paid booking cancelled (refund made in Stripe)', $q$up
 select pg_temp.expect_ok('admin can add notes to a paid booking', $q$update public.enquiries set admin_notes = 'Refunded in Stripe 24 Nov' where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
 select pg_temp.expect_reject('admin deleting a paid booking', $q$delete from public.enquiries where reference = 'PRE-1'$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
 select pg_temp.expect_reject('server deleting a paid booking', $q$delete from public.enquiries where reference = 'PRE-1'$q$);
+select pg_temp.expect_reject('server TRUNCATE (no privilege)', $q$truncate public.enquiries cascade$q$);
+select pg_temp.expect_reject('admin login TRUNCATE (no privilege)', $q$truncate public.enquiries cascade$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
+select pg_temp.expect_reject('database owner TRUNCATE while a paid booking exists (e.g. SQL editor)', $q$truncate public.enquiries cascade$q$, '');
 select pg_temp.expect_ok('payment log entry', $q$insert into public.payments (enquiry_id, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind) values ('11111111-1111-4111-a111-111111111111', 'deposit_recorded', 37550, 'gbp', 'cs_1', 'pi_full', 'evt_1', 'full')$q$);
 select pg_temp.expect_reject('the same Stripe payment logged twice', $q$insert into public.payments (enquiry_id, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind) values ('11111111-1111-4111-a111-111111111111', 'deposit_recorded', 37550, 'gbp', 'cs_1', 'pi_full', 'evt_2', 'full')$q$);
 select pg_temp.expect_reject('the same Stripe payment on a second booking', $q$update public.enquiries set stripe_payment_intent_id = 'pi_full' where reference = 'PRE-2'$q$);

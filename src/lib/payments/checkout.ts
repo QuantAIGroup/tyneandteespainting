@@ -31,6 +31,8 @@ export interface DepositCheckoutInput {
   businessName: string;
   paymentType: PaymentType;
   depositPercent: number | null;
+  /** When the customer confirmed the cancellation policy (must be recorded before checkout). */
+  termsAcceptedAt: string | null;
   /** Changes whenever the request is re-issued, so Stripe's duplicate-protection key changes too. */
   requestVersion: string;
   previousSessionId: string | null;
@@ -43,6 +45,17 @@ export interface DepositCheckoutInput {
  * (turn them on in Stripe → Settings → Payment methods).
  */
 export async function createDepositCheckout(stripe: Stripe, input: DepositCheckoutInput): Promise<Stripe.Checkout.Session> {
+  // Second line of defence (the payment page checks first, the database last):
+  // only ever ask Stripe for exactly 100% of a valid agreed price, with consent recorded.
+  if (
+    input.paymentType !== "full" ||
+    !Number.isInteger(input.agreedPricePence) ||
+    input.agreedPricePence <= 0 ||
+    input.depositPence !== input.agreedPricePence ||
+    !input.termsAcceptedAt
+  ) {
+    throw new Error("Refusing to create a checkout: amount must be 100% of the agreed price and the cancellation policy must be confirmed");
+  }
   const balancePence = input.agreedPricePence - input.depositPence;
   const metadata = {
     enquiry_id: input.enquiryId,
@@ -50,6 +63,7 @@ export async function createDepositCheckout(stripe: Stripe, input: DepositChecko
     agreed_price_pence: String(input.agreedPricePence),
     deposit_pence: String(input.depositPence),
     kind: input.paymentType,
+    terms_accepted_at: input.termsAcceptedAt,
   };
   const label = paymentLabel(input.paymentType, input.depositPercent);
   return stripe.checkout.sessions.create(

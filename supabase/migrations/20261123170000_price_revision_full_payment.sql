@@ -1,5 +1,5 @@
 -- =====================================================================
--- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 4, after safety review)
+-- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 5, after safety review)
 -- Run AFTER the earlier migrations.
 --
 -- ALL-OR-NOTHING: the whole migration is ONE statement (a single DO block),
@@ -54,7 +54,12 @@ declare
          and extra_kind is null and quantity is null and unit_price_pence is null
          and coats is not null and coats between 1 and 5
          and condition is not null
-         and (estimated_labour_pence is null or estimated_labour_pence between 0 and 100000000)
+         -- Either priced normally (manual flag off) or withheld for a manual quote
+         -- because of its condition (manual flag on, no price) – never a mix
+         and (
+           (requires_manual_quote is false and estimated_labour_pence is not null and estimated_labour_pence between 0 and 100000000)
+           or (requires_manual_quote is true and estimated_labour_pence is null)
+         )
        )
        or (
          -- Fixed-price extra: kind, quantity, unit price and exact total; no measurement fields
@@ -102,6 +107,31 @@ declare
     'ceiling:ratePerSqm,minimumCharge:optional'
   ];
 
+  -- Every column the new rules use, with the type they must have ("table.column:type")
+  column_specs    constant text[] := array[
+    'quote_rooms.item_type:text', 'quote_rooms.label:text', 'quote_rooms.extra_kind:text', 'quote_rooms.quantity:int4',
+    'quote_rooms.unit_price_pence:int4', 'quote_rooms.coats:int4', 'quote_rooms.condition:jsonb',
+    'quote_rooms.estimated_labour_pence:int4', 'quote_rooms.requires_manual_quote:bool', 'quote_rooms.include_ceiling:bool',
+    'quote_rooms.measurement_mode:text', 'quote_rooms.length_m:numeric', 'quote_rooms.width_m:numeric', 'quote_rooms.height_m:numeric',
+    'quote_rooms.walls:jsonb', 'quote_rooms.skirting_length_m:numeric', 'quote_rooms.wall_area_sqm:numeric', 'quote_rooms.ceiling_area_sqm:numeric',
+    'enquiries.status:text', 'enquiries.payment_type:text', 'enquiries.agreed_price_pence:int4', 'enquiries.deposit_pence:int4',
+    'enquiries.deposit_percent:int4', 'enquiries.deposit_paid_pence:int4', 'enquiries.deposit_paid_at:timestamptz',
+    'enquiries.stripe_payment_intent_id:text', 'enquiries.stripe_checkout_session_id:text', 'enquiries.stripe_customer_id:text',
+    'enquiries.stripe_receipt_url:text', 'enquiries.payment_token:text',
+    'enquiries.cancellation_terms_accepted_at:timestamptz', 'enquiries.early_start_requested_at:timestamptz'
+  ];
+  -- Columns this migration adds (may be missing before it runs)
+  new_columns     constant text[] := array[
+    'quote_rooms.extra_kind', 'quote_rooms.quantity', 'quote_rooms.unit_price_pence',
+    'enquiries.cancellation_terms_accepted_at', 'enquiries.early_start_requested_at'
+  ];
+  col text;
+  col_type text;
+  fn_secdef boolean;
+  fn_owner text;
+  fn_config text[];
+  fn_public_exec bigint;
+
   price jsonb;
   new_price jsonb;
   merged_extras jsonb;
@@ -116,6 +146,21 @@ begin
   -- ===================================================================
   -- 0. PRE-FLIGHT CHECKS (nothing has been changed yet)
   -- ===================================================================
+
+  -- 0-. Every column the rules use exists with the right type
+  --     (new columns may be missing, but if present they must have the right type,
+  --     because "add column if not exists" would otherwise silently keep a wrong one)
+  foreach grp in array column_specs loop
+    col := split_part(grp, ':', 1);
+    select c.udt_name into col_type from information_schema.columns c
+    where c.table_schema = 'public' and c.table_name = split_part(col, '.', 1) and c.column_name = split_part(col, '.', 2);
+    if col_type is null and not (col = any (new_columns)) then
+      raise exception 'Stopped: column % is missing. Nothing was changed.', col;
+    end if;
+    if col_type is not null and col_type is distinct from split_part(grp, ':', 2) then
+      raise exception 'Stopped: column % has type % (expected %). Nothing was changed.', col, col_type, split_part(grp, ':', 2);
+    end if;
+  end loop;
 
   -- 0a. Price list: exists, is an object, every group well-formed.
   --     (CASE guards every cast, so bad data gives a clear message, never a cast error.)
@@ -236,6 +281,15 @@ begin
   alter table public.quote_rooms add column if not exists quantity integer;
   alter table public.quote_rooms add column if not exists unit_price_pence integer;
 
+  foreach grp in array column_specs loop
+    col := split_part(grp, ':', 1);
+    select c.udt_name into col_type from information_schema.columns c
+    where c.table_schema = 'public' and c.table_name = split_part(col, '.', 1) and c.column_name = split_part(col, '.', 2);
+    if col_type is distinct from split_part(grp, ':', 2) then
+      raise exception 'Stopped: column % is missing or has the wrong type after adding columns. Nothing was changed.', col;
+    end if;
+  end loop;
+
   -- 0d. Remaining pre-flight checks, which need the new columns to exist.
   --     If they fail, the columns added above are rolled back too.
   execute format('select count(*) from public.enquiries where (%s) is not true', enquiry_payment_consent_rule) into n;
@@ -346,7 +400,13 @@ begin
   $fn$;
   revoke all on function public.protect_payment_fields() from public, anon, authenticated;
 
-  -- Paid bookings are financial records: they can't be deleted (by anyone).
+  -- ===================================================================
+  -- 6. PAID BOOKINGS CAN'T BE REMOVED
+  --    Row deletes (admin login, website server) and TRUNCATE (only the
+  --    database owner/superuser has that privilege – e.g. the Supabase SQL
+  --    editor) are refused while any paid booking exists. This cannot stop a
+  --    database owner who deliberately disables triggers.
+  -- ===================================================================
   create or replace function public.prevent_paid_enquiry_delete()
   returns trigger
   language plpgsql
@@ -362,8 +422,80 @@ begin
   $fn$;
   revoke all on function public.prevent_paid_enquiry_delete() from public, anon, authenticated;
 
+  create or replace function public.prevent_paid_enquiry_truncate()
+  returns trigger
+  language plpgsql
+  security invoker
+  set search_path = ''
+  as $fn$
+  begin
+    if exists (select 1 from public.enquiries where deposit_paid_at is not null) then
+      raise exception 'The enquiries table contains paid bookings and cannot be truncated';
+    end if;
+    return null;
+  end;
+  $fn$;
+  revoke all on function public.prevent_paid_enquiry_truncate() from public, anon, authenticated;
+
+  -- ===================================================================
+  -- 7. ATTACH THE TRIGGERS EXPLICITLY (not relying on existing set-up)
+  -- ===================================================================
+  drop trigger if exists enquiries_protect_payment on public.enquiries;
+  create trigger enquiries_protect_payment before update on public.enquiries
+    for each row execute function public.protect_payment_fields();
+
   drop trigger if exists enquiries_prevent_paid_delete on public.enquiries;
   create trigger enquiries_prevent_paid_delete before delete on public.enquiries
     for each row execute function public.prevent_paid_enquiry_delete();
+
+  drop trigger if exists enquiries_prevent_paid_truncate on public.enquiries;
+  create trigger enquiries_prevent_paid_truncate before truncate on public.enquiries
+    for each statement execute function public.prevent_paid_enquiry_truncate();
+
+  -- ===================================================================
+  -- 8. FINAL VERIFICATION – if anything below is wrong, the whole
+  --    migration is rolled back.
+  -- ===================================================================
+  foreach grp in array array[
+    'protect_payment_fields:enquiries_protect_payment:19',        -- BEFORE UPDATE, FOR EACH ROW
+    'prevent_paid_enquiry_delete:enquiries_prevent_paid_delete:11', -- BEFORE DELETE, FOR EACH ROW
+    'prevent_paid_enquiry_truncate:enquiries_prevent_paid_truncate:34' -- BEFORE TRUNCATE, FOR EACH STATEMENT
+  ] loop
+    k := split_part(grp, ':', 1);
+    select p.prosecdef, pg_get_userbyid(p.proowner), p.proconfig,
+           (select count(*) from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+            where a.privilege_type = 'EXECUTE' and (a.grantee = 0 or a.grantee in ('anon'::regrole, 'authenticated'::regrole)))
+      into fn_secdef, fn_owner, fn_config, fn_public_exec
+    from pg_proc p where p.oid = format('public.%I()', k)::regprocedure;
+    if fn_secdef is distinct from false then
+      raise exception 'Verification failed: % is not SECURITY INVOKER', k;
+    end if;
+    if fn_owner is distinct from 'postgres' then
+      raise exception 'Verification failed: % is owned by % (expected postgres)', k, fn_owner;
+    end if;
+    if fn_config is distinct from array['search_path=""'] then
+      raise exception 'Verification failed: % search_path is %', k, fn_config;
+    end if;
+    if fn_public_exec > 0 then
+      raise exception 'Verification failed: % can be executed by PUBLIC, anon or authenticated', k;
+    end if;
+
+    select count(*) into n from pg_trigger t
+    where t.tgrelid = 'public.enquiries'::regclass and not t.tgisinternal
+      and t.tgname = split_part(grp, ':', 2)
+      and t.tgfoid = format('public.%I()', k)::regprocedure
+      and t.tgtype = split_part(grp, ':', 3)::int2
+      and t.tgenabled = 'O';
+    if n is distinct from 1 then
+      raise exception 'Verification failed: trigger % is not attached as expected', split_part(grp, ':', 2);
+    end if;
+  end loop;
+
+  -- The payment function must not be attached anywhere else in a different way
+  select count(*) into n from pg_trigger t
+  where t.tgfoid = 'public.protect_payment_fields()'::regprocedure and not t.tgisinternal;
+  if n is distinct from 1 then
+    raise exception 'Verification failed: protect_payment_fields is attached % times (expected 1)', n;
+  end if;
 end
 $migration$;

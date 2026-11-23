@@ -111,3 +111,28 @@ describe("cancellation and refund information", () => {
     expect(MODEL_FORM_LINES).toContain("Date");
   });
 });
+
+describe("Stripe checkout helper refuses anything but 100% with consent", async () => {
+  const { createDepositCheckout } = await import("./checkout");
+  const base = {
+    enquiryId: "e", reference: "R", token: "t", customerEmail: "a@b.c", agreedService: "Work", agreedPricePence: 37550, depositPence: 37550,
+    businessName: "B", paymentType: "full" as const, depositPercent: null, termsAcceptedAt: "2026-11-23T12:00:00Z", requestVersion: "1", previousSessionId: null,
+  };
+  const calls: unknown[] = [];
+  const stripe = { checkout: { sessions: { create: async (p: unknown) => { calls.push(p); return { id: "cs" }; } } } } as unknown as Parameters<typeof createDepositCheckout>[0];
+
+  it.each([
+    ["a part payment", { depositPence: 18775 }],
+    ["an old-style deposit", { paymentType: "deposit" as const, depositPence: 18775, depositPercent: 50 }],
+    ["no agreed price", { agreedPricePence: 0, depositPence: 0 }],
+    ["no recorded consent", { termsAcceptedAt: null }],
+  ])("refuses %s", async (_label, change) => {
+    await expect(createDepositCheckout(stripe, { ...base, ...change })).rejects.toThrow(/Refusing/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("creates a session for exactly the agreed price", async () => {
+    await createDepositCheckout(stripe, base);
+    expect(calls).toHaveLength(1);
+  });
+});

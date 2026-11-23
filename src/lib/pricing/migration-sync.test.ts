@@ -71,7 +71,11 @@ describe("migration and website agree", () => {
     const code = sql.replace(/--.*$/gm, "").trim();
     expect(code.startsWith("do $migration$")).toBe(true);
     expect(code.endsWith("$migration$;")).toBe(true);
-    expect(code).not.toMatch(/\bdelete\s+from\b|\btruncate\b|\bdrop\s+table\b|\bdrop\s+column\b/i);
+    // No DELETE or TRUNCATE commands, no dropped tables or columns
+    // (the words only appear in the protective triggers: "before delete", "before truncate")
+    expect(code).not.toMatch(/^\s*(delete\s+from|truncate)\b/im);
+    expect(code).not.toMatch(/\bdrop\s+table\b|\bdrop\s+column\b/i);
+    expect(code).toContain("before truncate on public.enquiries");
     expect(code).not.toContain("?");
   });
 });

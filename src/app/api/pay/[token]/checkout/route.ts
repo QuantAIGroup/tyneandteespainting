@@ -40,13 +40,17 @@ export async function POST(request: Request, ctx: RouteContext<"/api/pay/[token]
   if (form?.get("acceptTerms") !== "on") return back(token, "?error=terms");
   const earlyStart = form.get("earlyStart") === "on";
   const now = new Date().toISOString();
-  const { error: consentError } = await supabase
+  const { data: consentRows, error: consentError } = await supabase
     .from("enquiries")
+    // Early start is a separate, explicit request – accepting the terms never implies it
     .update({ cancellation_terms_accepted_at: now, early_start_requested_at: earlyStart ? now : null })
     .eq("id", booking.id)
-    .is("deposit_paid_at", null);
-  if (consentError) {
-    console.error("Could not record cancellation consent", consentError);
+    .eq("status", "deposit_requested")
+    .is("deposit_paid_at", null)
+    .select("id, cancellation_terms_accepted_at");
+  // No payment page unless the confirmation is definitely saved on this booking
+  if (consentError || !consentRows || consentRows.length !== 1 || !consentRows[0].cancellation_terms_accepted_at) {
+    console.error("Could not record cancellation consent", consentError ?? "no row updated");
     return back(token, "?error=stripe");
   }
 
@@ -72,6 +76,7 @@ export async function POST(request: Request, ctx: RouteContext<"/api/pay/[token]
       businessName: business.name,
       paymentType: booking.paymentType,
       depositPercent: booking.depositPercent,
+      termsAcceptedAt: consentRows[0].cancellation_terms_accepted_at as string,
       requestVersion: String(new Date(booking.depositRequestedAt ?? 0).getTime()),
       previousSessionId: booking.stripeCheckoutSessionId,
     });

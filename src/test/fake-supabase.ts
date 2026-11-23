@@ -11,6 +11,8 @@ export class FakeDb {
   files: Record<string, string[]> = {};
   /** Make the next insert into this table fail (to test error handling). */
   failInsertOn = new Set<string>();
+  /** Make updates to this table match no rows (to test "nothing was saved" handling). */
+  noopUpdateOn = new Set<string>();
   calls: string[] = [];
 
   table(name: string): Row[] {
@@ -100,9 +102,9 @@ class Query implements PromiseLike<{ data: unknown; error: { message: string; co
       return { data: this.returning ? list : null, error: null };
     }
     if (this.mode === "update") {
-      const hit = rows.filter((r) => this.matches(r));
+      const hit = this.db.noopUpdateOn.has(this.name) ? [] : rows.filter((r) => this.matches(r));
       hit.forEach((r) => Object.assign(r, this.payload));
-      return { data: this.returning ? hit.map((r) => ({ id: r.id })) : null, error: null };
+      return { data: this.returning ? hit.map((r) => ({ ...r })) : null, error: null };
     }
     if (this.mode === "delete") {
       const keep = rows.filter((r) => !this.matches(r));

@@ -122,4 +122,21 @@ $P -d mig_r -c "select set_config('request.jwt.claims', '{\"role\":\"service_rol
 expect_stop mig_r "no recorded cancellation-policy confirmation" "paid booking without consent"
 [ "$(q mig_r "select count(*) from information_schema.columns where table_name='enquiries' and column_name='cancellation_terms_accepted_at'")" = 0 ] && pass "the new columns added before that check were rolled back too"
 
+echo "== 7. Payment trigger missing or misconfigured beforehand -> re-attached correctly"
+fresh mig_s; $P -d mig_s -c "drop trigger enquiries_protect_payment on public.enquiries" >/dev/null
+$P -d mig_s -f "$M" >/dev/null 2>&1
+[ "$(q mig_s "select count(*) from pg_trigger where tgrelid='public.enquiries'::regclass and tgname='enquiries_protect_payment' and tgtype=19 and tgenabled='O'")" = 1 ] && pass "missing payment trigger re-created as BEFORE UPDATE FOR EACH ROW"
+fresh mig_t; $P -d mig_t -c "drop trigger enquiries_protect_payment on public.enquiries" -c "create trigger enquiries_protect_payment after update on public.enquiries for each statement execute function public.protect_payment_fields()" >/dev/null
+$P -d mig_t -f "$M" >/dev/null 2>&1
+[ "$(q mig_t "select count(*) from pg_trigger where tgrelid='public.enquiries'::regclass and tgname='enquiries_protect_payment' and tgtype=19")" = 1 ] && pass "wrongly configured (AFTER / FOR EACH STATEMENT) trigger replaced with BEFORE UPDATE FOR EACH ROW"
+fresh mig_u; $P -d mig_u -c "alter table public.enquiries disable trigger enquiries_protect_payment" >/dev/null
+$P -d mig_u -f "$M" >/dev/null 2>&1
+[ "$(q mig_u "select tgenabled from pg_trigger where tgrelid='public.enquiries'::regclass and tgname='enquiries_protect_payment'")" = O ] && pass "a disabled payment trigger is re-enabled"
+
+echo "== 8. Column problems stop the migration"
+fresh mig_v; $P -d mig_v -c "alter table public.quote_rooms add column quantity text" >/dev/null
+expect_stop mig_v "column quote_rooms.quantity has type text" "a pre-existing 'quantity' column of the wrong type"
+fresh mig_w; $P -d mig_w -c "alter table public.quote_rooms alter column estimated_labour_pence type numeric" >/dev/null
+expect_stop mig_w "column quote_rooms.estimated_labour_pence has type numeric" "estimated_labour_pence not an integer"
+
 echo "== All migration checks passed"

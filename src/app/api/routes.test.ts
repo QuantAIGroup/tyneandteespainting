@@ -349,6 +349,29 @@ describe("Stripe checkout – charges exactly 100% of the agreed price", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it("won't open the payment page if the confirmation couldn't be saved", async () => {
+    seed();
+    db.noopUpdateOn.add("enquiries");
+    const res = await pay({ acceptTerms: "on" });
+    expect(res.headers.get("location")).toContain("error=");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("records the acceptance time and passes it to Stripe", async () => {
+    seed();
+    await pay({ acceptTerms: "on" });
+    const accepted = db.table("enquiries")[0].cancellation_terms_accepted_at as string;
+    expect(accepted).toBeTruthy();
+    expect((create.mock.calls[0][0] as { metadata: Record<string, string> }).metadata.terms_accepted_at).toBe(accepted);
+  });
+
+  it("refuses when there is no agreed price", async () => {
+    seed({ agreed_price_pence: null, deposit_pence: null });
+    const res = await pay({ acceptTerms: "on" });
+    expect(res.headers.get("location")).not.toContain("checkout.stripe.com");
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("refuses to charge anything other than 100% of the agreed price", async () => {
     seed({ deposit_pence: 18775, payment_type: "deposit", deposit_percent: 50 });
     const res = await pay({ acceptTerms: "on" });
