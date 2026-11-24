@@ -19,7 +19,7 @@ import { CANCELLATION_SUMMARY } from "@/config/cancellation";
 import { SITE } from "@/config/site";
 import { expireCheckoutSession, paymentLinkUrl } from "@/lib/payments/checkout";
 import { generatePaymentToken, getStripe } from "@/lib/payments/stripe";
-import { checkRefundRequest } from "@/lib/payments/refunds";
+import { checkOriginalPayment, checkRefundRequest } from "@/lib/payments/refunds";
 import { recordRefund } from "@/lib/payments/refund-record";
 import { canChangeStatus } from "@/lib/payments/status-transitions";
 import { formatPence } from "@/lib/pricing/engine";
@@ -242,6 +242,25 @@ export async function refundPayment(id: string, _prev: PaymentActionState, formD
     note,
   });
   if (!check.ok) return { ok: false, message: check.message };
+
+  // Verify the ORIGINAL payment with Stripe and against the payment log before refunding anything
+  const { data: logged, error: logError } = await supabase.from("payments").select("amount_pence, currency, outcome").eq("stripe_payment_intent_id", pi!).maybeSingle();
+  if (logError) return { ok: false, message: logError.message };
+  let original;
+  try {
+    const intent = await stripe.paymentIntents.retrieve(pi!, { expand: ["latest_charge"] });
+    const charge = typeof intent.latest_charge === "object" && intent.latest_charge ? intent.latest_charge : null;
+    original = checkOriginalPayment(
+      { status: intent.status, amountReceived: intent.amount_received, currency: intent.currency ?? "", enquiryId: intent.metadata?.enquiry_id, chargeAmount: charge?.amount ?? null, chargeAmountRefunded: charge?.amount_refunded ?? null },
+      { id, paidPence: enquiry.deposit_paid_pence as number, loggedAmountPence: (logged?.amount_pence as number | undefined) ?? null, loggedCurrency: (logged?.currency as string | undefined) ?? null },
+    );
+  } catch (err) {
+    return { ok: false, message: `Couldn't check the payment with Stripe: ${err instanceof Error ? err.message : "unknown error"}. No refund was made.` };
+  }
+  if (!original.ok) return { ok: false, message: original.message };
+  if (check.amountPence > original.stripeRefundablePence) {
+    return { ok: false, message: `Stripe shows only ${formatPence(original.stripeRefundablePence)} of this payment can still be refunded (a refund may have been made in the Stripe dashboard). No refund was made.` };
+  }
 
   const alreadyRefunded = ((refunds ?? []) as { amount_pence: number }[]).reduce((s, r) => s + r.amount_pence, 0);
   let refund;

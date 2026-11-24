@@ -5,7 +5,7 @@ import type { PaymentBooking } from "@/lib/payments/booking-server";
 import { formatPence } from "@/lib/pricing/engine";
 import { paymentLabel } from "@/lib/payments/deposit";
 import { CancellationSummary } from "@/components/CancellationPolicy";
-import { COOLING_OFF_DAYS } from "@/config/cancellation";
+import { CANCELLATION_TERMS_VERSION, CONSENT_STATEMENTS, COOLING_OFF_DAYS } from "@/config/cancellation";
 
 /** The booking/payment summary (separate so it's easy to restyle). */
 export function BookingSummary({
@@ -77,17 +77,30 @@ export function BookingSummary({
                 <div className="mt-2">
                   <CancellationSummary />
                 </div>
+                <p className="mt-3">
+                  Read the full <Link href="/cancellation" className="font-semibold underline">cancellation policy and cancellation form</Link> and the{" "}
+                  <Link href="/terms" className="font-semibold underline">terms and conditions</Link> (version {CANCELLATION_TERMS_VERSION}).
+                </p>
                 <label className="mt-4 flex items-start gap-3 text-[15px] text-ink">
                   <input type="checkbox" name="acceptTerms" required className="mt-1 size-4 shrink-0 accent-brand-600" />
-                  <span>I have read the cancellation and refund policy and the terms and conditions.</span>
+                  <span>{CONSENT_STATEMENTS.acceptTerms}</span>
                 </label>
-                <label className="mt-3 flex items-start gap-3 text-[15px] text-ink">
-                  <input type="checkbox" name="earlyStart" className="mt-1 size-4 shrink-0 accent-brand-600" />
-                  <span>
-                    <strong>Optional:</strong> I would like work to start within my {COOLING_OFF_DAYS}-day cooling-off period. I understand that if I then cancel, I will pay
-                    for work properly carried out up to that point, and that I lose the right to cancel once the work has been fully completed.
-                  </span>
-                </label>
+                <fieldset className="mt-4 rounded-xl bg-black/[0.03] p-4">
+                  <legend className="px-1 text-[15px] font-bold text-ink">Optional: starting within {COOLING_OFF_DAYS} days</legend>
+                  <p className="text-sm">Only tick these if you want us to start before your {COOLING_OFF_DAYS}-day cancellation period ends. If you ask for an early start, all three boxes are needed.</p>
+                  <label className="mt-3 flex items-start gap-3 text-[15px] text-ink">
+                    <input type="checkbox" name="earlyStart" className="mt-1 size-4 shrink-0 accent-brand-600" />
+                    <span>{CONSENT_STATEMENTS.earlyStart}</span>
+                  </label>
+                  <label className="mt-2 flex items-start gap-3 text-[15px] text-ink">
+                    <input type="checkbox" name="ackPayForWork" className="mt-1 size-4 shrink-0 accent-brand-600" />
+                    <span>{CONSENT_STATEMENTS.ackPayForWork}</span>
+                  </label>
+                  <label className="mt-2 flex items-start gap-3 text-[15px] text-ink">
+                    <input type="checkbox" name="ackLosesRight" className="mt-1 size-4 shrink-0 accent-brand-600" />
+                    <span>{CONSENT_STATEMENTS.ackLosesRight}</span>
+                  </label>
+                </fieldset>
               </div>
               <button type="submit" className="flex h-16 w-full items-center justify-center gap-3 rounded-lg bg-ink text-lg font-extrabold uppercase tracking-wide text-white shadow-lg transition hover:bg-brand-700 focus-visible:outline-4 focus-visible:outline-brand-500">
                 <Lock className="size-5" aria-hidden /> Pay {formatPence(booking.depositPence)}{isDeposit ? " deposit" : ""} and confirm booking

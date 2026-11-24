@@ -13,6 +13,8 @@ import { getStripe, isStripeConfigured, isValidPaymentToken } from "@/lib/paymen
 import { getBusinessSettings } from "@/lib/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { SITE } from "@/config/site";
+import { CANCELLATION_TERMS_VERSION } from "@/config/cancellation";
+import { checkConsent, termsFingerprint } from "@/lib/consent";
 
 const back = (token: string, query = "") => NextResponse.redirect(`${SITE.url}/pay/${token}${query}`, 303);
 
@@ -35,21 +37,55 @@ export async function POST(request: Request, ctx: RouteContext<"/api/pay/[token]
     return back(token, "?error=amount");
   }
 
-  // The customer must confirm they've read the cancellation and refund policy
+  // The customer must accept the cancellation terms. An early start is a separate,
+  // explicit request and needs both legally required acknowledgements.
   const form = await request.formData().catch(() => null);
-  if (form?.get("acceptTerms") !== "on") return back(token, "?error=terms");
-  const earlyStart = form.get("earlyStart") === "on";
-  const now = new Date().toISOString();
+  const choice = checkConsent({
+    acceptTerms: form?.get("acceptTerms") === "on",
+    earlyStart: form?.get("earlyStart") === "on",
+    ackPayForWork: form?.get("ackPayForWork") === "on",
+    ackLosesRight: form?.get("ackLosesRight") === "on",
+  });
+  if (!choice.ok) return back(token, `?error=${choice.error}`);
+
+  // 1. Evidence record: terms version, fingerprint of the exact text, the exact wording ticked, the price shown
+  const { data: consent, error: consentInsertError } = await supabase
+    .from("booking_consents")
+    .insert({
+      enquiry_id: booking.id,
+      terms_version: CANCELLATION_TERMS_VERSION,
+      terms_sha256: termsFingerprint(),
+      statements: choice.statements,
+      accepted_terms: true,
+      early_start_requested: choice.earlyStart,
+      early_start_ack_pay_for_work: choice.earlyStart,
+      early_start_ack_loses_right: choice.earlyStart,
+      amount_pence: booking.agreedPricePence,
+      user_agent: request.headers.get("user-agent")?.slice(0, 500) ?? null,
+    })
+    .select("id, created_at")
+    .single();
+  if (consentInsertError || !consent?.id) {
+    console.error("Could not record consent evidence", consentInsertError ?? "no row");
+    return back(token, "?error=stripe");
+  }
+  const acceptedAt = (consent.created_at as string | undefined) ?? new Date().toISOString();
+
+  // 2. Link it to the booking (only while it is still awaiting payment)
   const { data: consentRows, error: consentError } = await supabase
     .from("enquiries")
-    // Early start is a separate, explicit request – accepting the terms never implies it
-    .update({ cancellation_terms_accepted_at: now, early_start_requested_at: earlyStart ? now : null })
+    .update({
+      consent_id: consent.id,
+      cancellation_terms_accepted_at: acceptedAt,
+      cancellation_terms_version: CANCELLATION_TERMS_VERSION,
+      early_start_requested_at: choice.earlyStart ? acceptedAt : null,
+    })
     .eq("id", booking.id)
     .eq("status", "deposit_requested")
     .is("deposit_paid_at", null)
-    .select("id, cancellation_terms_accepted_at");
-  // No payment page unless the confirmation is definitely saved on this booking
-  if (consentError || !consentRows || consentRows.length !== 1 || !consentRows[0].cancellation_terms_accepted_at) {
+    .select("id, consent_id, cancellation_terms_accepted_at");
+  // No payment page unless the consent is definitely saved on this booking
+  if (consentError || !consentRows || consentRows.length !== 1 || consentRows[0].consent_id !== consent.id || !consentRows[0].cancellation_terms_accepted_at) {
     console.error("Could not record cancellation consent", consentError ?? "no row updated");
     return back(token, "?error=stripe");
   }
@@ -79,6 +115,8 @@ export async function POST(request: Request, ctx: RouteContext<"/api/pay/[token]
       paymentType: booking.paymentType,
       depositPercent: booking.depositPercent,
       termsAcceptedAt: consentRows[0].cancellation_terms_accepted_at as string,
+      consentId: consent.id as string,
+      termsVersion: CANCELLATION_TERMS_VERSION,
       requestVersion: String(new Date(booking.depositRequestedAt ?? 0).getTime()),
       previousSessionId: booking.stripeCheckoutSessionId,
     });

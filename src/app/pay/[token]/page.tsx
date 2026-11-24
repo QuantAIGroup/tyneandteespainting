@@ -21,6 +21,7 @@ const ERRORS: Record<string, string> = {
   busy: "Your payment page was just being prepared. Please press the button again.",
   amount: "This payment link needs updating. Please call us and we'll send you a new one.",
   terms: "Please tick the box to confirm you've read the cancellation and refund policy.",
+  earlystart: "To ask us to start within 14 days, please also tick both boxes confirming you understand what that means for cancelling. Or untick the early-start box.",
 };
 
 async function PaymentDetails({ params, searchParams }: Pick<PageProps<"/pay/[token]">, "params" | "searchParams">) {

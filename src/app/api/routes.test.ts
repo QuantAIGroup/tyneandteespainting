@@ -38,6 +38,7 @@ const { POST: stripeWebhook } = await import("./stripe/webhook/route");
 const { POST: startCheckout } = await import("./pay/[token]/checkout/route");
 const { getStripe } = await import("@/lib/payments/stripe");
 const { refundPayment } = await import("@/app/admin/payment-actions");
+const { CANCELLATION_TERMS_VERSION, CONSENT_STATEMENTS, TERMS_FINGERPRINTS } = await import("@/config/cancellation");
 
 const json = (body: unknown) => new Request("http://localhost/api", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
@@ -188,6 +189,8 @@ describe("Stripe webhook – 100% payments", () => {
       payment_token: "tok",
       cancellation_terms_accepted_at: "2026-11-23T12:00:00Z",
       stripe_checkout_session_id: "cs_1", // saved by the payment page when it opened Stripe checkout
+      consent_id: "con_1", // the customer's consent evidence record
+      cancellation_terms_version: "2026-11-23",
     });
   });
 
@@ -268,6 +271,14 @@ describe("Stripe webhook – 100% payments", () => {
     expect(db.table("refunds")[0]).toMatchObject({ stripe_refund_id: "re_dup", stripe_payment_intent_id: "pi_2", amount_pence: 37550, source: "duplicate_payment", status: "succeeded" });
     expect(db.table("enquiries")[0]).toEqual(paidBefore);
     expect(db.table("payments").slice(0, 1)).toEqual(logBefore);
+  });
+
+  it("ignores a live-mode event when the site uses test keys (and so never confirms from it)", async () => {
+    const live = event({}) as ReturnType<typeof event> & { livemode?: boolean };
+    live.livemode = true;
+    await send(live);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "deposit_requested", deposit_paid_at: null });
+    expect(db.table("payments")).toHaveLength(0);
   });
 
   it("two DIFFERENT payments at the same moment: one confirms the booking, only the other is refunded", async () => {
@@ -386,13 +397,20 @@ describe("Refunds – through Stripe, recorded separately, original payment unto
   const enquiryId = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
   const stripe = getStripe()!;
   const createRefund = vi.fn(async (params: { amount: number; payment_intent: string }) => ({ id: "re_admin", amount: params.amount, currency: "gbp", status: "succeeded", reason: "requested_by_customer", payment_intent: params.payment_intent, metadata: { source: "admin" } }));
+  let original: Record<string, unknown> = {};
+  const retrieveOriginal = vi.fn(async (id: string) => ({
+    id, status: "succeeded", amount_received: 37550, currency: "gbp", metadata: { enquiry_id: enquiryId },
+    latest_charge: { amount: 37550, amount_refunded: 0 }, ...original,
+  }));
   beforeAll(() => Object.assign(stripe.refunds, { create: createRefund }));
   beforeEach(() => {
+    Object.assign(stripe.paymentIntents, { retrieve: retrieveOriginal });
+    original = {};
     createRefund.mockClear();
     db.table("enquiries").push({
       id: enquiryId, reference: "TT-REF", status: "booking_confirmed", full_name: "Robin", email: "r@example.com", agreed_price_pence: 37550, deposit_pence: 37550,
       payment_type: "full", deposit_paid_at: "2026-11-23T12:00:00Z", deposit_paid_pence: 37550, stripe_payment_intent_id: "pi_paid", stripe_checkout_session_id: "cs_paid",
-      cancellation_terms_accepted_at: "2026-11-23T11:59:00Z",
+      cancellation_terms_accepted_at: "2026-11-23T11:59:00Z", consent_id: "con_r",
     });
     db.table("payments").push({ id: "pay1", enquiry_id: enquiryId, outcome: "deposit_recorded", amount_pence: 37550, currency: "gbp", stripe_payment_intent_id: "pi_paid", stripe_event_id: "evt_paid", kind: "full" });
   });
@@ -467,6 +485,42 @@ describe("Refunds – through Stripe, recorded separately, original payment unto
     expect(createRefund).not.toHaveBeenCalled();
   });
 
+  for (const [label, o] of [
+    ["Stripe says the original payment didn't succeed", { status: "processing" }],
+    ["the original payment isn't in GBP", { currency: "eur" }],
+    ["Stripe says the payment belongs to another booking", { metadata: { enquiry_id: "00000000-0000-4000-8000-000000000000" } }],
+    ["Stripe's amount differs from the booking's recorded payment", { amount_received: 30000 }],
+    ["Stripe shows it was already refunded in the dashboard", { latest_charge: { amount: 37550, amount_refunded: 37550 } }],
+  ] as const) {
+    it(`admin refund: refused when ${label} – Stripe isn't asked to refund`, async () => {
+      original = { ...o };
+      const res = await refundPayment(enquiryId, null, form({ amount: "375.50", note: "Cancelled more than 48 hours before" }));
+      expect(res?.ok).toBe(false);
+      expect(createRefund).not.toHaveBeenCalled();
+      expect(db.table("refunds")).toHaveLength(0);
+    });
+  }
+
+  it("admin refund: refused when the payment log doesn't match the booking's payment", async () => {
+    db.table("payments")[0].amount_pence = 100;
+    const res = await refundPayment(enquiryId, null, form({ amount: "375.50", note: "Cancelled more than 48 hours before" }));
+    expect(res?.ok).toBe(false);
+    expect(createRefund).not.toHaveBeenCalled();
+  });
+
+  it("admin refund: verifies the original payment with Stripe (including its charge) before refunding", async () => {
+    await refundPayment(enquiryId, null, form({ amount: "100", note: "Partial – evidenced costs" }));
+    expect(retrieveOriginal).toHaveBeenCalledWith("pi_paid", { expand: ["latest_charge"] });
+    expect(createRefund).toHaveBeenCalledTimes(1);
+  });
+
+  it("a refund that later fails (after succeeding) is updated; a stale 'pending' afterwards is ignored", async () => {
+    await refundEvent("refund.created", { status: "succeeded" });
+    await refundEvent("refund.failed", { status: "failed" });
+    await refundEvent("refund.updated", { status: "pending" });
+    expect(db.table("refunds")[0].status).toBe("failed");
+  });
+
   it("admin refund: if Stripe refuses, nothing is recorded or changed", async () => {
     createRefund.mockImplementationOnce(async () => { throw new Error("charge_already_refunded"); });
     const before = snapshot();
@@ -489,7 +543,7 @@ describe("Stripe webhook – part-payments can never confirm a booking", () => {
     return stripeWebhook(new Request("http://localhost/api/stripe/webhook", { method: "POST", headers: { "stripe-signature": signature }, body }));
   };
   const seed = (o: Record<string, unknown>) =>
-    db.table("enquiries").push({ id: enquiryId, reference: "TT-PART", status: "deposit_requested", full_name: "Pat", email: "p@example.com", agreed_price_pence: 37550, deposit_pence: 37550, payment_type: "full", deposit_paid_at: null, stripe_payment_intent_id: null, cancellation_terms_accepted_at: "2026-11-23T12:00:00Z", stripe_checkout_session_id: "cs_p", ...o });
+    db.table("enquiries").push({ id: enquiryId, reference: "TT-PART", status: "deposit_requested", full_name: "Pat", email: "p@example.com", agreed_price_pence: 37550, deposit_pence: 37550, payment_type: "full", deposit_paid_at: null, stripe_payment_intent_id: null, cancellation_terms_accepted_at: "2026-11-23T12:00:00Z", stripe_checkout_session_id: "cs_p", consent_id: "con_p", ...o });
 
   it("refuses a half payment even if the stored request was altered to half", async () => {
     seed({ deposit_pence: 18775 }); // tampered: 50% stored as if it were "full"
@@ -503,6 +557,13 @@ describe("Stripe webhook – part-payments can never confirm a booking", () => {
     await send(18775);
     expect(db.table("enquiries")[0].deposit_paid_at).toBeNull();
     expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review", notes: expect.stringContaining("Only full payment") });
+  });
+
+  it("refuses to confirm a booking without a consent evidence record (a timestamp alone isn't enough)", async () => {
+    seed({ consent_id: null });
+    await send(37550);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "deposit_requested", deposit_paid_at: null });
+    expect(db.table("payments")[0]).toMatchObject({ outcome: "needs_review", notes: expect.stringContaining("consent") });
   });
 
   it("refuses to confirm a booking if the cancellation policy confirmation wasn't recorded", async () => {
@@ -568,10 +629,42 @@ describe("Stripe checkout – charges exactly 100% of the agreed price", () => {
     expect(e.early_start_requested_at).toBeNull();
   });
 
-  it("records an early-start request when ticked", async () => {
+  it("records an early-start request only with both legally required acknowledgements", async () => {
     seed();
-    await pay({ acceptTerms: "on", earlyStart: "on" });
+    await pay({ acceptTerms: "on", earlyStart: "on", ackPayForWork: "on", ackLosesRight: "on" });
     expect(db.table("enquiries")[0].early_start_requested_at).toBeTruthy();
+    expect(db.table("booking_consents")[0]).toMatchObject({ early_start_requested: true, early_start_ack_pay_for_work: true, early_start_ack_loses_right: true });
+    expect(Object.keys(db.table("booking_consents")[0].statements as object)).toEqual(["acceptTerms", "earlyStart", "ackPayForWork", "ackLosesRight"]);
+  });
+
+  it("refuses an early-start request without both acknowledgements – no consent saved, no payment page", async () => {
+    for (const extra of [{}, { ackPayForWork: "on" }, { ackLosesRight: "on" }] as Record<string, string>[]) {
+      seed();
+      const res = await pay({ acceptTerms: "on", earlyStart: "on", ...extra });
+      expect(res.headers.get("location")).toContain("error=earlystart");
+      db.tables.enquiries = [];
+    }
+    expect(db.table("booking_consents")).toHaveLength(0);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("stores consent evidence: terms version, fingerprint of the exact text, exact wording, price shown – and links it to the booking", async () => {
+    seed();
+    await pay({ acceptTerms: "on" });
+    const c = db.table("booking_consents")[0];
+    expect(c).toMatchObject({ enquiry_id: db.table("enquiries")[0].id, terms_version: CANCELLATION_TERMS_VERSION, terms_sha256: TERMS_FINGERPRINTS[CANCELLATION_TERMS_VERSION], accepted_terms: true, early_start_requested: false, early_start_ack_pay_for_work: false, early_start_ack_loses_right: false, amount_pence: 37550 });
+    expect(c.statements).toEqual({ acceptTerms: CONSENT_STATEMENTS.acceptTerms });
+    expect(db.table("enquiries")[0]).toMatchObject({ consent_id: c.id, cancellation_terms_version: CANCELLATION_TERMS_VERSION, early_start_requested_at: null });
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ consent_id: c.id, terms_version: CANCELLATION_TERMS_VERSION }) }), expect.anything());
+  });
+
+  it("if the consent evidence can't be saved, no payment page is opened", async () => {
+    seed();
+    db.failInsertOn.add("booking_consents");
+    const res = await pay({ acceptTerms: "on" });
+    expect(res.headers.get("location")).toContain("error=stripe");
+    expect(create).not.toHaveBeenCalled();
+    expect(db.table("enquiries")[0].consent_id ?? null).toBeNull();
   });
 
   it("won't open the payment page until the cancellation policy is confirmed", async () => {

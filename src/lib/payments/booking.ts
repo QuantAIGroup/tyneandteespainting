@@ -75,6 +75,8 @@ export interface EnquiryPaymentState {
   termsAcceptedAt?: string | null;
   /** When given (the live webhook always gives it), the payment must come from this Stripe checkout page – the one the payment page saved on the booking. */
   checkoutSessionId?: string | null;
+  /** When given (the live webhook always gives it), the booking must have a consent evidence record. */
+  consentId?: string | null;
 }
 
 export interface StripePaymentReport {
@@ -102,6 +104,9 @@ export function decideDepositOutcome(enquiry: EnquiryPaymentState | null, paymen
   if (payment.currency.toLowerCase() !== "gbp") return { action: "needs_review", reason: `Unexpected currency ${payment.currency}` };
   if (enquiry.checkoutSessionId !== undefined && payment.checkoutSessionId !== undefined && (!enquiry.checkoutSessionId || enquiry.checkoutSessionId !== payment.checkoutSessionId)) {
     return { action: "needs_review", reason: `Paid on Stripe checkout ${payment.checkoutSessionId}, which is not this booking's current payment page (${enquiry.checkoutSessionId ?? "none"})` };
+  }
+  if (enquiry.consentId === null) {
+    return { action: "needs_review", reason: "Paid, but the booking has no recorded consent to the cancellation terms" };
   }
   if (enquiry.termsAcceptedAt === null) {
     return { action: "needs_review", reason: "The customer's confirmation of the cancellation policy was not recorded before payment" };

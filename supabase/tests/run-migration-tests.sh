@@ -6,17 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 P="psql -v ON_ERROR_STOP=1 -q -X"
 REAL_M=supabase/migrations/20261123170000_price_revision_full_payment.sql
-# PG16 (local) has no MAINTAIN privilege keyword; Supabase runs PG17. The local
-# copy differs from the real file in that one word only (checked below).
 PGVER=$($P -d postgres -tAc "show server_version_num")
 echo "== Testing on PostgreSQL $($P -d postgres -tAc "show server_version")"
-if [ "$PGVER" -ge 170000 ]; then
-  M="$REAL_M"   # same major version as Supabase: the migration file exactly as it will run
-else
-  M=/tmp/price_revision_pg16.sql
-  sed 's/references, maintain on tables/references on tables/' "$REAL_M" > "$M"
-  [ "$(diff "$REAL_M" "$M" | grep -c '^[<>]')" = 2 ] || { echo "FAIL  local PG16 copy differs from the migration by more than the MAINTAIN keyword"; exit 1; }
-fi
+M="$REAL_M"   # the migration file exactly as it will run, on every version (version-dependent SQL is conditional inside it)
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; exit 1; }
 q() { $P -d "$1" -tAc "$2"; }
@@ -82,12 +74,14 @@ $P -d mig_a -f "$M" 2>&1 | grep -o 'NOTICE:  Prices.*' | sed 's/^NOTICE:  /INFO 
 pass "migration re-ran without errors"
 $P -d mig_a >/dev/null <<'SQL'
 create view public._after_view as
-  select 'e' k, to_jsonb(e) - 'cancellation_terms_accepted_at' - 'early_start_requested_at' j from public.enquiries e union all
+  select 'e' k, to_jsonb(e) - 'cancellation_terms_accepted_at' - 'early_start_requested_at' - 'consent_id' - 'cancellation_terms_version' j from public.enquiries e union all
   select 'r', to_jsonb(r) - 'extra_kind' - 'quantity' - 'unit_price_pence' from public.quote_rooms r union all
   select 'p', to_jsonb(p) from public.enquiry_photos p union all
   select 'pay', to_jsonb(x) from public.payments x;
 SQL
-$P -d mig_a -f supabase/tests/price_revision_checks.sql
+$P -d mig_a -f supabase/tests/price_revision_checks.sql 2>&1 | tee /tmp/checks.out | grep -v 'NOTICE:'
+# Any FAIL line from the database checks fails the whole run
+if grep -q '^FAIL' /tmp/checks.out; then echo "FAIL  database checks reported failures"; exit 1; fi
 
 echo "== 2. Price list that already has an extras object (with an admin-changed door-frame price)"
 fresh mig_b
@@ -198,5 +192,39 @@ $P -d postgres -c "drop database if exists mig_p2" >/dev/null; for r in tt_custo
 fresh mig_p3; seed_customers mig_p3; $P -d mig_p3 -c "create role tt_reader; grant select on public.enquiries to tt_reader" >/dev/null 2>&1 || $P -d mig_p3 -c "grant select on public.enquiries to tt_reader" >/dev/null
 if $P -d mig_p3 -f "$M" >/dev/null 2>&1; then pass "a read-only extra role (like Supabase's read-only and ETL users) does not stop the migration"; else fail "read-only role wrongly stopped the migration"; fi
 $P -d postgres -c "drop database if exists mig_p3" -c "drop role if exists tt_reader" >/dev/null
+
+echo "== 12. Old deposit-era statuses stop the migration (records are not changed)"
+fresh mig_l; seed_customers mig_l
+$P -d mig_l -c "set session_replication_role = replica" -c "update public.enquiries set status = 'deposit_paid', agreed_price_pence = 22500, deposit_pence = 22500, consultation_confirmed_at = now(), payment_token = 'tok_l', deposit_paid_at = now(), deposit_paid_pence = 22500, stripe_payment_intent_id = 'pi_legacy' where reference = 'PRE-2'" >/dev/null
+expect_stop mig_l "old deposit-era statuses: PRE-2 (deposit_paid)" "a booking in the old 'payment received' (deposit_paid) status"
+if [ "$(q mig_l "select status from public.enquiries where reference = 'PRE-2'")" = deposit_paid ]; then pass "the legacy status was left exactly as it was"; else fail "record changed"; fi
+
+echo "== 13. Refund / consent tables that already exist must match exactly"
+stop_on() { # db, sql-before, expected message fragment, description
+  fresh "$1"; seed_customers "$1"; [ -n "$2" ] && $P -d "$1" -c "$2" >/dev/null
+  if $P -d "$1" -f "$M" >/dev/null 2>/tmp/mig.err; then fail "$4: migration should have stopped"; fi
+  grep -q "$3" /tmp/mig.err || { cat /tmp/mig.err; fail "$4: wrong error"; }
+  if [ "$(q "$1" "select count(*) from pg_constraint where conname = 'enquiries_full_payment_only'")" = 0 ]; then
+    pass "$4 -> stopped and rolled back ($(grep -oE '(Stopped|Verification failed): .{0,140}' /tmp/mig.err | head -1))"
+  else fail "$4: not rolled back"; fi
+}
+stop_on mig_t1 "create table public.refunds (id uuid primary key, enquiry_id uuid, stripe_refund_id text, stripe_payment_intent_id text, amount_pence integer, currency text, status text, stripe_reason text, source text, note text, created_at timestamptz, updated_at timestamptz)" \
+  "refunds / booking_consents tables are not exactly as required" "an existing refunds table with no constraints and nullable columns"
+stop_on mig_t2 "create table public.booking_consents (id uuid primary key, enquiry_id uuid not null references public.enquiries(id), terms_version text not null, terms_sha256 text not null, statements jsonb not null, accepted_terms boolean not null, early_start_requested boolean not null, early_start_ack_pay_for_work boolean not null, early_start_ack_loses_right boolean not null, amount_pence integer not null, user_agent text, created_at timestamptz not null default now(), customer_ip text)" \
+  "refunds / booking_consents tables are not exactly as required" "an existing consent table with an extra column and missing rules"
+# Re-runs: tables created by an earlier run, then weakened by hand
+fresh mig_t3; seed_customers mig_t3; $P -d mig_t3 -f "$M" >/dev/null
+$P -d mig_t3 -c "alter table public.refunds drop constraint refunds_amount" >/dev/null
+if $P -d mig_t3 -f "$M" >/dev/null 2>/tmp/mig.err; then fail "re-run accepted a refunds table without its amount rule"; fi
+if grep -q "missing constraint refunds_amount" /tmp/mig.err; then pass "re-run stops when a refund rule was removed by hand (missing constraint refunds_amount), nothing changed"; else cat /tmp/mig.err; fail "wrong error"; fi
+fresh mig_t4; seed_customers mig_t4; $P -d mig_t4 -f "$M" >/dev/null
+$P -d mig_t4 -c "create policy \"Anyone can read refunds\" on public.refunds for select to anon using (true)" >/dev/null
+if $P -d mig_t4 -f "$M" >/dev/null 2>/tmp/mig.err; then fail "re-run accepted an extra policy"; fi
+if grep -q "unexpected policy refunds: Anyone can read refunds" /tmp/mig.err; then pass "re-run stops when an extra row-level security policy appears (visitors reading refunds), nothing changed"; else cat /tmp/mig.err; fail "wrong error"; fi
+fresh mig_t5; seed_customers mig_t5; $P -d mig_t5 -f "$M" >/dev/null
+$P -d mig_t5 -c "alter table public.refunds alter column currency drop not null" >/dev/null
+if $P -d mig_t5 -f "$M" >/dev/null 2>/tmp/mig.err; then fail "re-run accepted a nullable currency"; fi
+if grep -q "refunds.currency" /tmp/mig.err; then pass "re-run stops when a refund column is made optional (currency), nothing changed"; else cat /tmp/mig.err; fail "wrong error"; fi
+for d in mig_t1 mig_t2 mig_t3 mig_t4 mig_t5 mig_l; do $P -d postgres -c "drop database if exists $d" >/dev/null; done
 
 echo "== All migration checks passed"

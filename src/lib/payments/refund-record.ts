@@ -1,7 +1,7 @@
 import "server-only";
 import type Stripe from "stripe";
 import type { createAdminClient } from "@/lib/supabase/admin";
-import { refundStatus } from "./refunds";
+import { canChangeRefundStatus, refundStatus } from "./refunds";
 
 type Db = NonNullable<ReturnType<typeof createAdminClient>>;
 export type RefundSource = "admin" | "duplicate_payment" | "stripe_dashboard";
@@ -9,7 +9,7 @@ export type RefundSource = "admin" | "duplicate_payment" | "stripe_dashboard";
 /**
  * Records a Stripe refund in its OWN record (public.refunds). Never touches the
  * original payment. Safe to call more than once for the same refund: the first
- * call adds it, later calls only update a pending refund's Stripe status.
+ * call adds it, later calls only apply Stripe's genuine status changes.
  * Returns true if this call added a new record.
  */
 export async function recordRefund(
@@ -41,8 +41,9 @@ export async function recordRefund(
     if (error) throw new Error(error.message);
     return true;
   }
-  // Already recorded: only a pending refund's status can move on (the database enforces this too)
-  if (existing.status !== status && (existing.status === "pending" || existing.status === "requires_action")) {
+  // Already recorded: only Stripe's genuine status changes are applied (the database enforces the same
+  // list). Out-of-order or repeated events that would move a refund backwards are ignored.
+  if (existing.status !== status && canChangeRefundStatus(existing.status as string, status)) {
     const { error } = await supabase.from("refunds").update({ status, updated_at: new Date().toISOString() }).eq("stripe_refund_id", refund.id);
     if (error) throw new Error(error.message);
   }

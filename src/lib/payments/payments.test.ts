@@ -76,8 +76,10 @@ describe("booking status rules", () => {
     for (const s of ["booking_confirmed", "work_completed", "balance_paid"]) {
       expect(canSetStatusManually(s, { status: "deposit_requested", depositPaid: false })).toBe(false);
     }
+    // Rule change (full payment only): bookings can't leave the old deposit-era status either –
+    // the migration refuses to run while any booking is in it
     for (const s of ["booking_confirmed", "work_completed"]) {
-      expect(canSetStatusManually(s, { status: "deposit_paid", depositPaid: true })).toBe(true);
+      expect(canSetStatusManually(s, { status: "deposit_paid", depositPaid: true })).toBe(false);
     }
     // Rule change (full payment only): "Balance paid" belonged to the old deposit system and can no longer be entered
     expect(canSetStatusManually("balance_paid", { status: "deposit_paid", depositPaid: true })).toBe(false);

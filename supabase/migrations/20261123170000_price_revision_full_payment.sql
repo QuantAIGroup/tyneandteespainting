@@ -1,5 +1,5 @@
 -- =====================================================================
--- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 8, after safety review)
+-- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 9, after safety review)
 -- Run AFTER the earlier migrations.
 --
 -- ALL-OR-NOTHING: the whole migration is ONE statement (a single DO block),
@@ -40,11 +40,18 @@ declare
        or (deposit_paid_at is not null and deposit_paid_pence is not null
            and agreed_price_pence is not null and deposit_paid_pence = agreed_price_pence)$r$;
 
+  -- A payment needs the customer's recorded consent (an evidence record in
+  -- booking_consents, the terms version and the time). A timestamp alone is not enough.
   enquiry_payment_consent_rule constant text :=
-    $r$deposit_paid_at is null or cancellation_terms_accepted_at is not null$r$;
+    $r$deposit_paid_at is null
+       or (consent_id is not null and cancellation_terms_accepted_at is not null and cancellation_terms_version is not null)$r$;
 
   enquiry_early_start_rule constant text :=
-    $r$early_start_requested_at is null or cancellation_terms_accepted_at is not null$r$;
+    $r$early_start_requested_at is null or consent_id is not null$r$;
+
+  -- The consent link, version and time are recorded together or not at all
+  enquiry_consent_link_rule constant text :=
+    $r$consent_id is null or (cancellation_terms_accepted_at is not null and cancellation_terms_version is not null)$r$;
 
   room_shape_rule constant text :=
     $r$(
@@ -119,18 +126,95 @@ declare
     'enquiries.stripe_payment_intent_id:text', 'enquiries.stripe_checkout_session_id:text', 'enquiries.stripe_customer_id:text',
     'enquiries.stripe_receipt_url:text', 'enquiries.payment_token:text',
     'enquiries.cancellation_terms_accepted_at:timestamptz', 'enquiries.early_start_requested_at:timestamptz',
-    'payments.enquiry_id:uuid',
+    'enquiries.consent_id:uuid', 'enquiries.cancellation_terms_version:text',
+    'payments.enquiry_id:uuid', 'payments.stripe_payment_intent_id:text', 'payments.amount_pence:int4', 'payments.currency:text',
+    'enquiry_photos.enquiry_id:uuid',
     'refunds.id:uuid', 'refunds.enquiry_id:uuid', 'refunds.stripe_refund_id:text', 'refunds.stripe_payment_intent_id:text',
     'refunds.amount_pence:int4', 'refunds.currency:text', 'refunds.status:text', 'refunds.stripe_reason:text',
-    'refunds.source:text', 'refunds.note:text', 'refunds.created_at:timestamptz', 'refunds.updated_at:timestamptz'
+    'refunds.source:text', 'refunds.note:text', 'refunds.created_at:timestamptz', 'refunds.updated_at:timestamptz',
+    'booking_consents.id:uuid', 'booking_consents.enquiry_id:uuid', 'booking_consents.terms_version:text',
+    'booking_consents.terms_sha256:text', 'booking_consents.statements:jsonb', 'booking_consents.accepted_terms:bool',
+    'booking_consents.early_start_requested:bool', 'booking_consents.early_start_ack_pay_for_work:bool',
+    'booking_consents.early_start_ack_loses_right:bool', 'booking_consents.amount_pence:int4',
+    'booking_consents.user_agent:text', 'booking_consents.created_at:timestamptz'
   ];
   -- Columns this migration adds (may be missing before it runs)
   new_columns     constant text[] := array[
     'quote_rooms.extra_kind', 'quote_rooms.quantity', 'quote_rooms.unit_price_pence',
     'enquiries.cancellation_terms_accepted_at', 'enquiries.early_start_requested_at',
+    'enquiries.consent_id', 'enquiries.cancellation_terms_version',
     'refunds.id', 'refunds.enquiry_id', 'refunds.stripe_refund_id', 'refunds.stripe_payment_intent_id',
     'refunds.amount_pence', 'refunds.currency', 'refunds.status', 'refunds.stripe_reason',
-    'refunds.source', 'refunds.note', 'refunds.created_at', 'refunds.updated_at'
+    'refunds.source', 'refunds.note', 'refunds.created_at', 'refunds.updated_at',
+    'booking_consents.id', 'booking_consents.enquiry_id', 'booking_consents.terms_version', 'booking_consents.terms_sha256',
+    'booking_consents.statements', 'booking_consents.accepted_terms', 'booking_consents.early_start_requested',
+    'booking_consents.early_start_ack_pay_for_work', 'booking_consents.early_start_ack_loses_right',
+    'booking_consents.amount_pence', 'booking_consents.user_agent', 'booking_consents.created_at'
+  ];
+  -- Exact shape of the two new tables ("table|column|type|not null"). A table that
+  -- already exists (created earlier, by this or anything else) must match exactly,
+  -- because CREATE TABLE IF NOT EXISTS never changes an existing table.
+  new_table_columns constant text[] := array[
+    'refunds|id|uuid|t', 'refunds|enquiry_id|uuid|f', 'refunds|stripe_refund_id|text|t', 'refunds|stripe_payment_intent_id|text|t',
+    'refunds|amount_pence|int4|t', 'refunds|currency|text|t', 'refunds|status|text|t', 'refunds|stripe_reason|text|f',
+    'refunds|source|text|t', 'refunds|note|text|f', 'refunds|created_at|timestamptz|t', 'refunds|updated_at|timestamptz|t',
+    'booking_consents|id|uuid|t', 'booking_consents|enquiry_id|uuid|t', 'booking_consents|terms_version|text|t',
+    'booking_consents|terms_sha256|text|t', 'booking_consents|statements|jsonb|t', 'booking_consents|accepted_terms|bool|t',
+    'booking_consents|early_start_requested|bool|t', 'booking_consents|early_start_ack_pay_for_work|bool|t',
+    'booking_consents|early_start_ack_loses_right|bool|t', 'booking_consents|amount_pence|int4|t',
+    'booking_consents|user_agent|text|f', 'booking_consents|created_at|timestamptz|t'
+  ];
+  -- Exact constraints and indexes of the two new tables ("table|name|type|definition",
+  -- as PostgreSQL 16 and 17 both print them, schema prefix removed)
+  new_table_constraints constant text[] := array[
+    $c$booking_consents|booking_consents_amount|c|CHECK (((amount_pence >= 1) AND (amount_pence <= 5000000)))$c$,
+    $c$booking_consents|booking_consents_early_start_acks|c|CHECK (((early_start_requested AND early_start_ack_pay_for_work AND early_start_ack_loses_right) OR ((NOT early_start_requested) AND (NOT early_start_ack_pay_for_work) AND (NOT early_start_ack_loses_right))))$c$,
+    $c$booking_consents|booking_consents_enquiry_fkey|f|FOREIGN KEY (enquiry_id) REFERENCES enquiries(id) ON DELETE RESTRICT$c$,
+    $c$booking_consents|booking_consents_id_enquiry_key|u|UNIQUE (id, enquiry_id)$c$,
+    $c$booking_consents|booking_consents_pkey|p|PRIMARY KEY (id)$c$,
+    $c$booking_consents|booking_consents_sha256_format|c|CHECK ((terms_sha256 ~ '^[0-9a-f]{64}$'::text))$c$,
+    $c$booking_consents|booking_consents_statements_object|c|CHECK ((jsonb_typeof(statements) = 'object'::text))$c$,
+    $c$booking_consents|booking_consents_terms_accepted|c|CHECK ((accepted_terms IS TRUE))$c$,
+    $c$booking_consents|booking_consents_user_agent|c|CHECK (((user_agent IS NULL) OR (length(user_agent) <= 500)))$c$,
+    $c$booking_consents|booking_consents_version_format|c|CHECK ((terms_version ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}(\.[0-9]{1,3}){0,1}$'::text))$c$,
+    $c$refunds|refunds_admin_needs_booking|c|CHECK (((source <> 'admin'::text) OR (enquiry_id IS NOT NULL)))$c$,
+    $c$refunds|refunds_amount|c|CHECK (((amount_pence >= 1) AND (amount_pence <= 5000000)))$c$,
+    $c$refunds|refunds_currency|c|CHECK ((currency ~ '^[a-z]{3}$'::text))$c$,
+    $c$refunds|refunds_enquiry_fkey|f|FOREIGN KEY (enquiry_id) REFERENCES enquiries(id) ON DELETE RESTRICT$c$,
+    $c$refunds|refunds_note|c|CHECK (((note IS NULL) OR (length(note) <= 500)))$c$,
+    $c$refunds|refunds_payment_fkey|f|FOREIGN KEY (stripe_payment_intent_id) REFERENCES payments(stripe_payment_intent_id) ON DELETE RESTRICT$c$,
+    $c$refunds|refunds_pkey|p|PRIMARY KEY (id)$c$,
+    $c$refunds|refunds_source|c|CHECK ((source = ANY (ARRAY['admin'::text, 'duplicate_payment'::text, 'stripe_dashboard'::text])))$c$,
+    $c$refunds|refunds_status|c|CHECK ((status = ANY (ARRAY['pending'::text, 'requires_action'::text, 'succeeded'::text, 'failed'::text, 'canceled'::text])))$c$,
+    $c$refunds|refunds_stripe_refund_id_key|u|UNIQUE (stripe_refund_id)$c$
+  ];
+  new_table_indexes constant text[] := array[
+    'booking_consents|booking_consents_enquiry_idx|CREATE INDEX booking_consents_enquiry_idx ON booking_consents USING btree (enquiry_id)',
+    'booking_consents|booking_consents_id_enquiry_key|CREATE UNIQUE INDEX booking_consents_id_enquiry_key ON booking_consents USING btree (id, enquiry_id)',
+    'booking_consents|booking_consents_pkey|CREATE UNIQUE INDEX booking_consents_pkey ON booking_consents USING btree (id)',
+    'refunds|refunds_enquiry_idx|CREATE INDEX refunds_enquiry_idx ON refunds USING btree (enquiry_id)',
+    'refunds|refunds_payment_idx|CREATE INDEX refunds_payment_idx ON refunds USING btree (stripe_payment_intent_id)',
+    'refunds|refunds_pkey|CREATE UNIQUE INDEX refunds_pkey ON refunds USING btree (id)',
+    'refunds|refunds_stripe_refund_id_key|CREATE UNIQUE INDEX refunds_stripe_refund_id_key ON refunds USING btree (stripe_refund_id)'
+  ];
+  -- Exact row-level security policies on every booking table ("table|policy|command|roles|using|with check").
+  -- Admins only; nothing for visitors.
+  booking_policies constant text[] := array[
+    'booking_consents|Admins can read booking consents|SELECT|authenticated|is_admin()|',
+    'enquiries|Admins can delete enquiries|DELETE|authenticated|is_admin()|',
+    'enquiries|Admins can read enquiries|SELECT|authenticated|is_admin()|',
+    'enquiries|Admins can update enquiries|UPDATE|authenticated|is_admin()|is_admin()',
+    'enquiry_photos|Admins can read enquiry photos|SELECT|authenticated|is_admin()|',
+    'payments|Admins can read payments|SELECT|authenticated|is_admin()|',
+    'quote_rooms|Admins can read quote rooms|SELECT|authenticated|is_admin()|',
+    'refunds|Admins can read refunds|SELECT|authenticated|is_admin()|'
+  ];
+  -- Rules this migration adds to existing tables: must exist and be validated
+  our_constraints constant text[] := array[
+    'enquiries:enquiries_full_payment_only', 'enquiries:enquiries_full_payment_amount', 'enquiries:enquiries_paid_in_full',
+    'enquiries:enquiries_payment_needs_consent', 'enquiries:enquiries_early_start_needs_terms', 'enquiries:enquiries_consent_complete',
+    'enquiries:enquiries_consent_fkey', 'quote_rooms:quote_rooms_item_type_check', 'quote_rooms:quote_rooms_extra_shape_check',
+    'payments:payments_stripe_payment_intent_id_key'
   ];
   col text;
   col_type text;
@@ -195,10 +279,13 @@ begin
   if n > 0 then
     raise exception 'Stopped: paid bookings have an unpaid status: %. Nothing was changed.', k;
   end if;
-  --     (iii) the two old deposit-era statuses are still recognised, but can no longer be entered – report any in use
-  select count(*) into n from public.enquiries where status in ('deposit_paid', 'balance_paid');
+  --     (iii) the two old deposit-era statuses (deposit_paid, balance_paid) stay in the
+  --           allowed-values list for compatibility, but no booking may enter or leave
+  --           them under full payment. Any booking already in one stops the migration.
+  select count(*), string_agg(reference || ' (' || status || ')', ', ' order by reference) into n, k
+  from (select reference, status from public.enquiries where status in ('deposit_paid', 'balance_paid') order by reference limit 20) x;
   if n > 0 then
-    raise notice 'Note: % existing booking(s) use the old deposit-era statuses (deposit_paid / balance_paid). They are kept as they are.', n;
+    raise exception 'Stopped: bookings use the old deposit-era statuses: %. Review them before migrating. Nothing was changed.', k;
   end if;
 
   -- 0a. Price list: exists, is an object, every group well-formed.
@@ -320,29 +407,135 @@ begin
   alter table public.quote_rooms add column if not exists quantity integer;
   alter table public.quote_rooms add column if not exists unit_price_pence integer;
 
-  -- Refund record: every refund made through Stripe, kept SEPARATELY from the
-  -- original payment (which is never altered or deleted). Append-only: only a
-  -- refund's Stripe status can be updated afterwards (step 6).
-  create table if not exists public.refunds (
-    id uuid primary key default gen_random_uuid(),
-    enquiry_id uuid references public.enquiries (id) on delete set null,   -- null if not matched to a booking
-    stripe_refund_id text not null unique,
-    stripe_payment_intent_id text not null,                                 -- the original payment that was refunded
-    amount_pence integer not null check (amount_pence between 1 and 5000000),
-    currency text not null check (currency ~ '^[a-z]{3}$'),
-    status text not null check (status in ('pending', 'requires_action', 'succeeded', 'failed', 'canceled')),
-    stripe_reason text,                                                      -- Stripe's reason code, if any
-    source text not null check (source in ('admin', 'duplicate_payment', 'stripe_dashboard')),
-    note text check (note is null or length(note) <= 500),
+  alter table public.enquiries add column if not exists consent_id uuid;                 -- the consent evidence record (booking_consents)
+  alter table public.enquiries add column if not exists cancellation_terms_version text; -- version of the cancellation terms accepted
+
+  -- CONSENT EVIDENCE: one record each time a customer confirms on the payment
+  -- page – which terms (version and a SHA-256 fingerprint of the exact text),
+  -- the exact wording of every box they ticked, the price shown, and, if they
+  -- asked for work to start within 14 days, that request and the two
+  -- acknowledgements the law requires. Append-only (step 6).
+  create table if not exists public.booking_consents (
+    id uuid not null default gen_random_uuid(),
+    enquiry_id uuid not null,
+    terms_version text not null,
+    terms_sha256 text not null,
+    statements jsonb not null,
+    accepted_terms boolean not null,
+    early_start_requested boolean not null,
+    early_start_ack_pay_for_work boolean not null,
+    early_start_ack_loses_right boolean not null,
+    amount_pence integer not null,
+    user_agent text,
     created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    constraint booking_consents_pkey primary key (id),
+    constraint booking_consents_id_enquiry_key unique (id, enquiry_id),
+    constraint booking_consents_enquiry_fkey foreign key (enquiry_id) references public.enquiries (id) on delete restrict,
+    constraint booking_consents_terms_accepted check (accepted_terms is true),
+    constraint booking_consents_version_format check (terms_version ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}(\.[0-9]{1,3}){0,1}$'),
+    constraint booking_consents_sha256_format check (terms_sha256 ~ '^[0-9a-f]{64}$'),
+    constraint booking_consents_statements_object check (jsonb_typeof(statements) = 'object'),
+    constraint booking_consents_early_start_acks check (
+      (early_start_requested and early_start_ack_pay_for_work and early_start_ack_loses_right)
+      or (not early_start_requested and not early_start_ack_pay_for_work and not early_start_ack_loses_right)),
+    constraint booking_consents_amount check (amount_pence between 1 and 5000000),
+    constraint booking_consents_user_agent check (user_agent is null or length(user_agent) <= 500)
+  );
+  create index if not exists booking_consents_enquiry_idx on public.booking_consents (enquiry_id);
+
+  -- REFUND RECORD: every refund made through Stripe, kept SEPARATELY from the
+  -- original payment (which is never altered or deleted). Each refund points at
+  -- the original payment in the payment log, and can never be moved to another
+  -- booking. Append-only: only Stripe's genuine status changes can be recorded (step 6).
+  create table if not exists public.refunds (
+    id uuid not null default gen_random_uuid(),
+    enquiry_id uuid,                                  -- null only if the original payment isn't linked to a booking
+    stripe_refund_id text not null,
+    stripe_payment_intent_id text not null,           -- the original payment that was refunded
+    amount_pence integer not null,
+    currency text not null,
+    status text not null,
+    stripe_reason text,                               -- Stripe's reason code, if any
+    source text not null,
+    note text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    constraint refunds_pkey primary key (id),
+    constraint refunds_stripe_refund_id_key unique (stripe_refund_id),
+    constraint refunds_enquiry_fkey foreign key (enquiry_id) references public.enquiries (id) on delete restrict,
+    constraint refunds_payment_fkey foreign key (stripe_payment_intent_id) references public.payments (stripe_payment_intent_id) on delete restrict,
+    constraint refunds_amount check (amount_pence between 1 and 5000000),
+    constraint refunds_currency check (currency ~ '^[a-z]{3}$'),
+    constraint refunds_status check (status in ('pending', 'requires_action', 'succeeded', 'failed', 'canceled')),
+    constraint refunds_source check (source in ('admin', 'duplicate_payment', 'stripe_dashboard')),
+    constraint refunds_note check (note is null or length(note) <= 500),
+    constraint refunds_admin_needs_booking check (source <> 'admin' or enquiry_id is not null)
   );
   create index if not exists refunds_enquiry_idx on public.refunds (enquiry_id);
   create index if not exists refunds_payment_idx on public.refunds (stripe_payment_intent_id);
+
+  -- The two tables must now be EXACTLY as defined above. If either existed
+  -- before (CREATE TABLE IF NOT EXISTS leaves an existing table untouched)
+  -- and differs in any column, NOT NULL setting, constraint or index, stop.
+  select string_agg(x, '; ' order by x) into k from (
+    (select 'unexpected/different column ' || c.table_name || '.' || c.column_name || ' ' || c.udt_name
+            || case when c.is_nullable = 'NO' then ' not null' else ' nullable' end as x
+     from information_schema.columns c
+     where c.table_schema = 'public' and c.table_name in ('refunds', 'booking_consents')
+       and (c.table_name || '|' || c.column_name || '|' || c.udt_name || '|' || case when c.is_nullable = 'NO' then 't' else 'f' end)
+           <> all (new_table_columns))
+    union all
+    (select 'missing column ' || split_part(e, '|', 1) || '.' || split_part(e, '|', 2)
+     from unnest(new_table_columns) e
+     where not exists (select 1 from information_schema.columns c
+                       where c.table_schema = 'public' and c.table_name = split_part(e, '|', 1) and c.column_name = split_part(e, '|', 2)
+                         and c.udt_name = split_part(e, '|', 3) and (c.is_nullable = 'NO') = (split_part(e, '|', 4) = 't')))
+    union all
+    (select 'unexpected/different constraint ' || con.conrelid::regclass::text || '.' || con.conname
+     from pg_constraint con
+     where con.conrelid in ('public.refunds'::regclass, 'public.booking_consents'::regclass) and con.contype <> 'n'
+       and (replace(con.conrelid::regclass::text, 'public.', '') || '|' || con.conname || '|' || con.contype::text || '|'
+            || replace(pg_get_constraintdef(con.oid), 'public.', '')) <> all (new_table_constraints))
+    union all
+    (select 'missing constraint ' || split_part(e, '|', 2)
+     from unnest(new_table_constraints) e
+     where not exists (select 1 from pg_constraint con
+                       where con.conrelid = format('public.%I', split_part(e, '|', 1))::regclass and con.conname = split_part(e, '|', 2)
+                         and con.convalidated
+                         and (replace(con.conrelid::regclass::text, 'public.', '') || '|' || con.conname || '|' || con.contype::text || '|'
+                              || replace(pg_get_constraintdef(con.oid), 'public.', '')) = e))
+    union all
+    (select 'unexpected/different index ' || i.indexname
+     from pg_indexes i where i.schemaname = 'public' and i.tablename in ('refunds', 'booking_consents')
+       and (i.tablename || '|' || i.indexname || '|' || replace(i.indexdef, 'public.', '')) <> all (new_table_indexes))
+    union all
+    (select 'missing index ' || split_part(e, '|', 2)
+     from unnest(new_table_indexes) e
+     where not exists (select 1 from pg_indexes i where i.schemaname = 'public'
+                       and (i.tablename || '|' || i.indexname || '|' || replace(i.indexdef, 'public.', '')) = e))
+  ) d;
+  if k is not null then
+    raise exception 'Stopped: the refunds / booking_consents tables are not exactly as required (%). Nothing was changed.', k;
+  end if;
+
+  -- A booking can only point at ITS OWN consent record (two-column link)
+  alter table public.enquiries drop constraint if exists enquiries_consent_fkey;
+  alter table public.enquiries add constraint enquiries_consent_fkey
+    foreign key (consent_id, id) references public.booking_consents (id, enquiry_id) on delete restrict;
+
+  -- Access (both tables): visitors nothing; admin login read-only (row-level
+  -- security: admins only); website server read and add (refunds: also update
+  -- the Stripe status). Nobody can delete.
+  alter table public.booking_consents enable row level security;
+  drop policy if exists "Admins can read booking consents" on public.booking_consents;
+  create policy "Admins can read booking consents" on public.booking_consents for select to authenticated using (public.is_admin());
+  revoke all on public.booking_consents from public, anon, authenticated, service_role;
+  grant select on public.booking_consents to authenticated;
+  grant select, insert on public.booking_consents to service_role;
+
   alter table public.refunds enable row level security;
   drop policy if exists "Admins can read refunds" on public.refunds;
   create policy "Admins can read refunds" on public.refunds for select to authenticated using (public.is_admin());
-  -- Visitors nothing; admin login read-only; website server read, add and update status. Nobody deletes.
   revoke all on public.refunds from public, anon, authenticated, service_role;
   grant select on public.refunds to authenticated;
   grant select, insert, update on public.refunds to service_role;
@@ -361,6 +554,10 @@ begin
   execute format('select count(*) from public.enquiries where (%s) is not true', enquiry_payment_consent_rule) into n;
   if n > 0 then
     raise exception 'Stopped: % paid enquiries have no recorded cancellation-policy confirmation. Nothing was changed.', n;
+  end if;
+  execute format('select count(*) from public.enquiries where (%s) is not true', enquiry_consent_link_rule) into n;
+  if n > 0 then
+    raise exception 'Stopped: % enquiries link to a consent record without its terms version or time. Nothing was changed.', n;
   end if;
   execute format('select count(*) from public.enquiries where (%s) is not true', enquiry_early_start_rule) into n;
   if n > 0 then
@@ -387,6 +584,8 @@ begin
   execute format('alter table public.enquiries add constraint enquiries_payment_needs_consent check (%s)', enquiry_payment_consent_rule);
   alter table public.enquiries drop constraint if exists enquiries_early_start_needs_terms;
   execute format('alter table public.enquiries add constraint enquiries_early_start_needs_terms check (%s)', enquiry_early_start_rule);
+  alter table public.enquiries drop constraint if exists enquiries_consent_complete;
+  execute format('alter table public.enquiries add constraint enquiries_consent_complete check (%s)', enquiry_consent_link_rule);
 
   -- ===================================================================
   -- 4. ROOM RECORDS – counted extras, strict shapes
@@ -449,15 +648,12 @@ begin
       'unpaid:cancelled>awaiting_consultation',
       'unpaid:cancelled>declined',
       'payment:deposit_requested>booking_confirmed',
-      'paid:deposit_paid>booking_confirmed',
-      'paid:deposit_paid>work_completed',
-      'paid:deposit_paid>cancelled',
       'paid:booking_confirmed>work_completed',
       'paid:booking_confirmed>cancelled',
-      'paid:work_completed>booking_confirmed',
       'paid:work_completed>cancelled'
     ];
     change_kind text;
+    consent record;
   begin
     if new.status is null or not (new.status = any (known_statuses)) then
       raise exception 'Unknown booking status: %', coalesce(new.status, 'NULL');
@@ -471,7 +667,8 @@ begin
          or new.stripe_payment_intent_id is not null or new.stripe_checkout_session_id is not null
          or new.stripe_customer_id is not null or new.stripe_receipt_url is not null
          or new.payment_token is not null
-         or new.cancellation_terms_accepted_at is not null or new.early_start_requested_at is not null then
+         or new.cancellation_terms_accepted_at is not null or new.early_start_requested_at is not null
+         or new.consent_id is not null or new.cancellation_terms_version is not null then
         raise exception 'A new enquiry must start as awaiting consultation, with no price or payment details';
       end if;
       return new;
@@ -491,7 +688,9 @@ begin
          or new.payment_type is distinct from old.payment_type
          or new.deposit_percent is distinct from old.deposit_percent
          or new.cancellation_terms_accepted_at is distinct from old.cancellation_terms_accepted_at
-         or new.early_start_requested_at is distinct from old.early_start_requested_at then
+         or new.early_start_requested_at is distinct from old.early_start_requested_at
+         or new.consent_id is distinct from old.consent_id
+         or new.cancellation_terms_version is distinct from old.cancellation_terms_version then
         raise exception 'Payment fields can only be changed by the website server';
       end if;
     end if;
@@ -509,6 +708,8 @@ begin
          or new.payment_token is distinct from old.payment_token
          or new.cancellation_terms_accepted_at is distinct from old.cancellation_terms_accepted_at
          or new.early_start_requested_at is distinct from old.early_start_requested_at
+         or new.consent_id is distinct from old.consent_id
+         or new.cancellation_terms_version is distinct from old.cancellation_terms_version
          or (old.stripe_customer_id is not null and new.stripe_customer_id is distinct from old.stripe_customer_id)
          or (old.stripe_receipt_url is not null and new.stripe_receipt_url is distinct from old.stripe_receipt_url) then
         raise exception 'The agreed price and payment cannot change after payment is received';
@@ -529,6 +730,15 @@ begin
          or new.stripe_checkout_session_id is distinct from old.stripe_checkout_session_id
          or new.stripe_payment_intent_id is null then
         raise exception 'A payment can only be recorded against this booking''s own Stripe checkout, with its Stripe payment reference';
+      end if;
+      -- ...and with the customer's consent evidence for exactly this booking, price and terms
+      select c.* into consent from public.booking_consents c where c.id = new.consent_id and c.enquiry_id = new.id;
+      if not found
+         or consent.amount_pence is distinct from new.agreed_price_pence
+         or consent.terms_version is distinct from new.cancellation_terms_version
+         or consent.early_start_requested is distinct from (new.early_start_requested_at is not null)
+         or consent.created_at > new.deposit_paid_at then
+        raise exception 'A payment can only be recorded with the customer''s consent record for this booking, price and terms';
       end if;
     end if;
     if change_kind = 'payment' or new.status is distinct from old.status then
@@ -621,10 +831,12 @@ begin
   $fn$;
   revoke all on function public.protect_payment_log() from public, anon, authenticated;
 
-  -- Room and extra records of a paid booking are what the customer paid for:
-  -- they can't be added to, changed or removed afterwards. SECURITY DEFINER so
-  -- the check always sees the booking, whatever the caller's row-level access.
-  create or replace function public.protect_paid_quote_rooms()
+  -- Room/extra records and photo records of a paid booking are part of what
+  -- the customer paid for: they can't be added to, changed or removed
+  -- afterwards – by anyone, including the website server. Reading them is
+  -- unaffected. SECURITY DEFINER so the check always sees the booking,
+  -- whatever the caller's row-level access.
+  create or replace function public.protect_paid_booking_records()
   returns trigger
   language plpgsql
   security definer
@@ -633,26 +845,43 @@ begin
   begin
     if tg_op in ('UPDATE', 'DELETE')
        and exists (select 1 from public.enquiries where id = old.enquiry_id and deposit_paid_at is not null) then
-      raise exception 'Room records of a paid booking cannot be changed or removed';
+      raise exception '% of a paid booking cannot be changed or removed', case tg_table_name when 'quote_rooms' then 'Room records' else 'Photo records' end;
     end if;
     if tg_op in ('INSERT', 'UPDATE')
        and exists (select 1 from public.enquiries where id = new.enquiry_id and deposit_paid_at is not null) then
-      raise exception 'Room records cannot be added to a paid booking';
+      raise exception '% cannot be added to a paid booking', case tg_table_name when 'quote_rooms' then 'Room records' else 'Photo records' end;
     end if;
     return case when tg_op = 'DELETE' then old else new end;
   end;
   $fn$;
-  revoke all on function public.protect_paid_quote_rooms() from public, anon, authenticated;
+  revoke all on function public.protect_paid_booking_records() from public, anon, authenticated;
+  -- (an earlier draft used a quote_rooms-only function; never applied to production)
+  drop trigger if exists quote_rooms_protect_paid on public.quote_rooms;
+  drop function if exists public.protect_paid_quote_rooms();
 
-  -- Refund record: append-only. Only a refund's Stripe status (and its
-  -- updated time) may change, plus the automatic unlinking if an unpaid
-  -- enquiry is deleted. SECURITY DEFINER so the TRUNCATE check sees every row.
+  -- Refund record rules (SECURITY DEFINER: the checks must see every row):
+  --  * a new refund must match its ORIGINAL payment in the payment log: same
+  --    booking and same currency, and all refunds of that payment together
+  --    (except failed/cancelled ones) can never exceed it. The payment row is
+  --    locked while checking, so two refunds at once can't both slip through;
+  --  * afterwards only Stripe's real status changes can be recorded:
+  --    pending/requires action -> any outcome, succeeded -> failed (Stripe can
+  --    report a refund failing after it succeeded); failed and cancelled are final;
+  --  * nothing else can change – including the booking link – and refunds
+  --    can't be deleted or truncated.
   create or replace function public.protect_refund_log()
   returns trigger
   language plpgsql
   security definer
   set search_path = ''
   as $fn$
+  declare
+    pay record;
+    already bigint;
+    allowed_status_changes constant text[] := array[
+      'pending>requires_action', 'pending>succeeded', 'pending>failed', 'pending>canceled',
+      'requires_action>pending', 'requires_action>succeeded', 'requires_action>failed', 'requires_action>canceled',
+      'succeeded>failed'];
   begin
     if tg_op = 'TRUNCATE' then
       if exists (select 1 from public.refunds) then
@@ -663,21 +892,79 @@ begin
     if tg_op = 'DELETE' then
       raise exception 'Refund records cannot be deleted';
     end if;
-    if (to_jsonb(new) - 'status' - 'updated_at' - 'enquiry_id') = (to_jsonb(old) - 'status' - 'updated_at' - 'enquiry_id')
-       and (new.enquiry_id is not distinct from old.enquiry_id or new.enquiry_id is null)
-       -- a finished refund's outcome is final
-       and (new.status is not distinct from old.status or old.status in ('pending', 'requires_action')) then
+    if tg_op = 'INSERT' then
+      select p.amount_pence, p.currency, p.enquiry_id into pay
+      from public.payments p where p.stripe_payment_intent_id = new.stripe_payment_intent_id
+      for update;
+      if not found then
+        raise exception 'A refund must refer to a payment in the payment log';
+      end if;
+      if new.enquiry_id is distinct from pay.enquiry_id then
+        raise exception 'A refund must belong to the same booking as the original payment';
+      end if;
+      if new.currency is distinct from lower(pay.currency) then
+        raise exception 'A refund must be in the currency of the original payment (%)', pay.currency;
+      end if;
+      if new.status in ('pending', 'requires_action', 'succeeded') then
+        select coalesce(sum(r.amount_pence), 0) into already from public.refunds r
+        where r.stripe_payment_intent_id = new.stripe_payment_intent_id and r.status in ('pending', 'requires_action', 'succeeded');
+        if already + new.amount_pence > pay.amount_pence then
+          raise exception 'Refunds would exceed the original payment (% already refunded of %)', already, pay.amount_pence;
+        end if;
+      end if;
       return new;
     end if;
-    raise exception 'Refund records cannot be changed (only a pending refund''s Stripe status can be updated)';
+    -- UPDATE
+    if (to_jsonb(new) - 'status' - 'updated_at') is distinct from (to_jsonb(old) - 'status' - 'updated_at') then
+      raise exception 'Refund records cannot be changed (only the Stripe status can be updated)';
+    end if;
+    if new.status is distinct from old.status and not ((old.status || '>' || new.status) = any (allowed_status_changes)) then
+      raise exception 'Refund status cannot change from % to %', old.status, new.status;
+    end if;
+    return new;
   end;
   $fn$;
   revoke all on function public.protect_refund_log() from public, anon, authenticated;
 
+  -- Consent evidence rules (SECURITY DEFINER: the checks must see every row):
+  -- a consent can only be recorded for a booking that is awaiting payment,
+  -- for exactly its agreed price; afterwards it can never be changed,
+  -- deleted or truncated.
+  create or replace function public.protect_consent_log()
+  returns trigger
+  language plpgsql
+  security definer
+  set search_path = ''
+  as $fn$
+  begin
+    if tg_op = 'TRUNCATE' then
+      if exists (select 1 from public.booking_consents) then
+        raise exception 'The consent record cannot be truncated';
+      end if;
+      return null;
+    end if;
+    if tg_op = 'INSERT' then
+      if not exists (select 1 from public.enquiries e
+                     where e.id = new.enquiry_id and e.status = 'deposit_requested' and e.deposit_paid_at is null
+                       and e.agreed_price_pence = new.amount_pence) then
+        raise exception 'Consent can only be recorded for a booking awaiting payment, for its agreed price';
+      end if;
+      return new;
+    end if;
+    raise exception 'Consent records cannot be changed or deleted';
+  end;
+  $fn$;
+  revoke all on function public.protect_consent_log() from public, anon, authenticated;
+
   -- New tables created by postgres in this schema would otherwise give the
   -- website server TRUNCATE/TRIGGER/REFERENCES/MAINTAIN automatically
   -- (existing tables were already corrected by the api_grants migration).
-  execute 'alter default privileges for role postgres in schema public revoke truncate, trigger, references, maintain on tables from service_role';
+  -- MAINTAIN only exists from PostgreSQL 17 (Supabase runs 17); on 16 the keyword would be a syntax error.
+  if current_setting('server_version_num')::int >= 170000 then
+    execute 'alter default privileges for role postgres in schema public revoke truncate, trigger, references, maintain on tables from service_role';
+  else
+    execute 'alter default privileges for role postgres in schema public revoke truncate, trigger, references on tables from service_role';
+  end if;
 
   -- ===================================================================
   -- 7. ATTACH THE TRIGGERS EXPLICITLY (not relying on existing set-up)
@@ -704,10 +991,22 @@ begin
 
   drop trigger if exists quote_rooms_protect_paid on public.quote_rooms;
   create trigger quote_rooms_protect_paid before insert or update or delete on public.quote_rooms
-    for each row execute function public.protect_paid_quote_rooms();
+    for each row execute function public.protect_paid_booking_records();
+
+  drop trigger if exists enquiry_photos_protect_paid on public.enquiry_photos;
+  create trigger enquiry_photos_protect_paid before insert or update or delete on public.enquiry_photos
+    for each row execute function public.protect_paid_booking_records();
+
+  drop trigger if exists booking_consents_append_only on public.booking_consents;
+  create trigger booking_consents_append_only before insert or update or delete on public.booking_consents
+    for each row execute function public.protect_consent_log();
+
+  drop trigger if exists booking_consents_prevent_truncate on public.booking_consents;
+  create trigger booking_consents_prevent_truncate before truncate on public.booking_consents
+    for each statement execute function public.protect_consent_log();
 
   drop trigger if exists refunds_append_only on public.refunds;
-  create trigger refunds_append_only before update or delete on public.refunds
+  create trigger refunds_append_only before insert or update or delete on public.refunds
     for each row execute function public.protect_refund_log();
 
   drop trigger if exists refunds_prevent_truncate on public.refunds;
@@ -727,7 +1026,7 @@ begin
   --    migration is rolled back.
   -- ===================================================================
   -- name:expected SECURITY DEFINER
-  foreach grp in array array['protect_payment_fields:false', 'prevent_paid_enquiry_delete:false', 'prevent_paid_enquiry_truncate:true', 'protect_payment_log:true', 'protect_paid_quote_rooms:true', 'protect_refund_log:true'] loop
+  foreach grp in array array['protect_payment_fields:false', 'prevent_paid_enquiry_delete:false', 'prevent_paid_enquiry_truncate:true', 'protect_payment_log:true', 'protect_paid_booking_records:true', 'protect_refund_log:true', 'protect_consent_log:true'] loop
     k := split_part(grp, ':', 1);
     select p.prosecdef, pg_get_userbyid(p.proowner), p.proconfig,
            (select count(*) from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
@@ -759,10 +1058,13 @@ begin
     'enquiries:enquiries_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',        -- BEFORE TRUNCATE, FOR EACH STATEMENT
     'quote_rooms:quote_rooms_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',
     'enquiry_photos:enquiry_photos_prevent_paid_truncate:prevent_paid_enquiry_truncate:34',
-    'quote_rooms:quote_rooms_protect_paid:protect_paid_quote_rooms:31',              -- BEFORE INSERT OR UPDATE OR DELETE, FOR EACH ROW
+    'quote_rooms:quote_rooms_protect_paid:protect_paid_booking_records:31',              -- BEFORE INSERT OR UPDATE OR DELETE, FOR EACH ROW
+    'enquiry_photos:enquiry_photos_protect_paid:protect_paid_booking_records:31',
+    'booking_consents:booking_consents_append_only:protect_consent_log:31',
+    'booking_consents:booking_consents_prevent_truncate:protect_consent_log:34',
     'payments:payments_append_only:protect_payment_log:27',                     -- BEFORE UPDATE OR DELETE, FOR EACH ROW
     'payments:payments_prevent_truncate:protect_payment_log:34',
-    'refunds:refunds_append_only:protect_refund_log:27',
+    'refunds:refunds_append_only:protect_refund_log:31',
     'refunds:refunds_prevent_truncate:protect_refund_log:34'
   ] loop
     select count(*) into n from pg_trigger t
@@ -796,7 +1098,8 @@ begin
     'authenticated:enquiry_photos:SELECT', 'authenticated:payments:SELECT',
     'service_role:enquiries:SELECT,INSERT,UPDATE,DELETE', 'service_role:quote_rooms:SELECT,INSERT,UPDATE,DELETE',
     'service_role:enquiry_photos:SELECT,INSERT,UPDATE,DELETE', 'service_role:payments:SELECT,INSERT,UPDATE,DELETE',
-    'anon:refunds:', 'authenticated:refunds:SELECT', 'service_role:refunds:SELECT,INSERT,UPDATE'
+    'anon:refunds:', 'authenticated:refunds:SELECT', 'service_role:refunds:SELECT,INSERT,UPDATE',
+    'anon:booking_consents:', 'authenticated:booking_consents:SELECT', 'service_role:booking_consents:SELECT,INSERT'
   ] loop
     fields := array['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'];
     if current_setting('server_version_num')::int >= 170000 then
@@ -816,10 +1119,35 @@ begin
     end loop;
   end loop;
 
+  -- Row-level security policies on every booking table must be exactly the admin-only set
+  select string_agg(x, '; ' order by x) into k from (
+    (select 'unexpected policy ' || p.tablename || ': ' || p.policyname as x from pg_policies p
+     where p.schemaname = 'public' and p.tablename in ('enquiries', 'quote_rooms', 'enquiry_photos', 'payments', 'refunds', 'booking_consents')
+       and (p.tablename || '|' || p.policyname || '|' || p.cmd || '|' || array_to_string(p.roles, ',') || '|'
+            || replace(coalesce(p.qual, ''), 'public.', '') || '|' || replace(coalesce(p.with_check, ''), 'public.', '')) <> all (booking_policies))
+    union all
+    (select 'missing policy ' || split_part(e, '|', 1) || ': ' || split_part(e, '|', 2) from unnest(booking_policies) e
+     where not exists (select 1 from pg_policies p where p.schemaname = 'public'
+       and (p.tablename || '|' || p.policyname || '|' || p.cmd || '|' || array_to_string(p.roles, ',') || '|'
+            || replace(coalesce(p.qual, ''), 'public.', '') || '|' || replace(coalesce(p.with_check, ''), 'public.', '')) = e))
+  ) d;
+  if k is not null then
+    raise exception 'Verification failed: row-level security policies are not as intended (%)', k;
+  end if;
+
+  -- Every rule this migration relies on exists and is validated (applies to all existing rows)
+  select string_agg(e, ', ') into k from unnest(our_constraints) e
+  where not exists (select 1 from pg_constraint con
+                    where con.conrelid = format('public.%I', split_part(e, ':', 1))::regclass
+                      and con.conname = split_part(e, ':', 2) and con.convalidated);
+  if k is not null then
+    raise exception 'Verification failed: rules missing or not validated: %', k;
+  end if;
+
   -- Row-level security must be on for every booking table
   select string_agg(c.relname, ', ') into k from pg_class c
   where c.oid in ('public.enquiries'::regclass, 'public.quote_rooms'::regclass, 'public.enquiry_photos'::regclass,
-                  'public.payments'::regclass, 'public.refunds'::regclass)
+                  'public.payments'::regclass, 'public.refunds'::regclass, 'public.booking_consents'::regclass)
     and not c.relrowsecurity;
   if k is not null then
     raise exception 'Verification failed: row-level security is off for %', k;
@@ -830,7 +1158,7 @@ begin
   -- superuser (supabase_admin), and the two roles checked above.
   select string_agg(distinct r.rolname || ' (' || t.tbl || ' ' || p.priv || ')', ', ') into k
   from pg_roles r
-  cross join (values ('enquiries'), ('quote_rooms'), ('enquiry_photos'), ('payments'), ('refunds')) t(tbl)
+  cross join (values ('enquiries'), ('quote_rooms'), ('enquiry_photos'), ('payments'), ('refunds'), ('booking_consents')) t(tbl)
   cross join (values ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('TRIGGER')) p(priv)
   where r.rolname not in ('postgres', 'supabase_admin', 'service_role', 'authenticated')
     and r.rolname !~ '^pg_'   -- built-in roles (e.g. pg_write_all_data); any role GIVEN their rights is still checked
@@ -842,7 +1170,7 @@ begin
   end if;
   select count(*) into n
   from pg_class c, aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) a
-  where c.oid in ('public.enquiries'::regclass, 'public.quote_rooms'::regclass, 'public.enquiry_photos'::regclass, 'public.payments'::regclass, 'public.refunds'::regclass)
+  where c.oid in ('public.enquiries'::regclass, 'public.quote_rooms'::regclass, 'public.enquiry_photos'::regclass, 'public.payments'::regclass, 'public.refunds'::regclass, 'public.booking_consents'::regclass)
     and a.grantee = 0;
   if n > 0 then
     raise exception 'Verification failed: PUBLIC has privileges on a booking table';
@@ -851,7 +1179,7 @@ begin
   -- Roles that CAN truncate (owner/superuser or any later grant) are all subject to the guards above
   select string_agg(distinct r.rolname, ', ' order by r.rolname) into k
   from pg_roles r
-  cross join (values ('public.enquiries'), ('public.quote_rooms'), ('public.enquiry_photos'), ('public.payments'), ('public.refunds')) t(tbl)
+  cross join (values ('public.enquiries'), ('public.quote_rooms'), ('public.enquiry_photos'), ('public.payments'), ('public.refunds'), ('public.booking_consents')) t(tbl)
   where has_table_privilege(r.oid, t.tbl::regclass, 'TRUNCATE');
   raise notice 'Roles able to TRUNCATE booking tables (all subject to the truncate guards): %', coalesce(k, 'none');
 end

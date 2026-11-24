@@ -54,3 +54,27 @@ export const MODEL_FORM_LINES = [
   "Signature of consumer(s) (only if this form is notified on paper),",
   "Date",
 ];
+
+/**
+ * VERSION of the cancellation terms. Every customer's consent record stores
+ * this version plus a SHA-256 fingerprint of the exact text above and below
+ * (see src/lib/consent.ts). If you change ANY of the wording in this file:
+ *   1. set a new version (today's date, e.g. "2027-03-01"), and
+ *   2. add its fingerprint to TERMS_FINGERPRINTS (the failing test prints it).
+ * Never edit an existing fingerprint – it is the record of what earlier
+ * customers agreed to.
+ */
+export const CANCELLATION_TERMS_VERSION = "2026-11-23";
+
+/** Exact wording of each box on the payment page – stored word-for-word with every consent. */
+export const CONSENT_STATEMENTS = {
+  acceptTerms: "I have read and accept the cancellation and refund policy and the terms and conditions.",
+  earlyStart: `I expressly ask Tyne & Tees Painting to start the work within my ${COOLING_OFF_DAYS}-day cancellation period.`,
+  ackPayForWork: "I understand that if I cancel after work has started, I will pay for the work properly carried out up to the time I tell you I am cancelling.",
+  ackLosesRight: "I understand that I will lose my right to cancel once the work has been fully completed.",
+} as const;
+
+/** version → SHA-256 fingerprint of the terms text for that version. */
+export const TERMS_FINGERPRINTS: Record<string, string> = {
+  "2026-11-23": "e95011f0e5dd1c07cdc21735c849af7c3af1a4906c346574b16f36a7af00eeda",
+};

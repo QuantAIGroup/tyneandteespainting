@@ -2,6 +2,7 @@ import Link from "next/link";
 import { AlertTriangle, Camera, Info } from "lucide-react";
 import { requireAdmin } from "@/lib/auth";
 import { ENQUIRY_STATUSES } from "@/lib/enquiry";
+import { LEGACY_STATUSES } from "@/lib/payments/status-transitions";
 import { formatPence } from "@/lib/pricing/engine";
 import { createSessionClient } from "@/lib/supabase/server";
 import { StatusBadge } from "./StatusBadge";
@@ -49,7 +50,7 @@ export default async function EnquiriesPage({ searchParams }: PageProps<"/admin"
         <Link href="/admin" className={`rounded-full px-3.5 py-1.5 text-sm ${!filter ? "bg-ink-900 text-white" : "bg-white text-ink-800 ring-1 ring-ink-900/10"}`}>
           All
         </Link>
-        {ENQUIRY_STATUSES.map((s) => (
+        {ENQUIRY_STATUSES.filter((s) => !LEGACY_STATUSES.includes(s.id)).map((s) => (
           <Link key={s.id} href={`/admin?status=${s.id}`} className={`rounded-full px-3.5 py-1.5 text-sm ${filter === s.id ? "bg-ink-900 text-white" : "bg-white text-ink-800 ring-1 ring-ink-900/10"}`}>
             {s.label}
           </Link>

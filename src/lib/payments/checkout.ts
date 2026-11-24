@@ -33,6 +33,9 @@ export interface DepositCheckoutInput {
   depositPercent: number | null;
   /** When the customer confirmed the cancellation policy (must be recorded before checkout). */
   termsAcceptedAt: string | null;
+  /** The consent evidence record and the terms version accepted (stored in Stripe for cross-checking). */
+  consentId?: string;
+  termsVersion?: string;
   /** Changes whenever the request is re-issued, so Stripe's duplicate-protection key changes too. */
   requestVersion: string;
   previousSessionId: string | null;
@@ -64,6 +67,8 @@ export async function createDepositCheckout(stripe: Stripe, input: DepositChecko
     deposit_pence: String(input.depositPence),
     kind: input.paymentType,
     terms_accepted_at: input.termsAcceptedAt,
+    ...(input.consentId ? { consent_id: input.consentId } : {}),
+    ...(input.termsVersion ? { terms_version: input.termsVersion } : {}),
   };
   const label = paymentLabel(input.paymentType, input.depositPercent);
   return stripe.checkout.sessions.create(

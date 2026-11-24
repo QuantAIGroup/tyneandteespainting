@@ -12,8 +12,14 @@
  *
  * Keeping the same status (e.g. adding notes) is always allowed, except when a
  * payment is being recorded, which must move "Payment requested" → "Booking confirmed".
+ *
  * "Payment received" (deposit_paid) and "Balance paid" belonged to the older
- * deposit system and can no longer be entered.
+ * deposit system. They are kept only as display labels and in the database's
+ * allowed-values list; no booking can enter or leave them (the migration stops
+ * if any booking is in one).
+ *
+ * "Work completed" is final apart from cancelling: there is no documented
+ * business need to move a completed job back to "Booking confirmed".
  */
 export type TransitionKind = "unpaid" | "payment" | "paid";
 
@@ -29,10 +35,9 @@ export const STATUS_TRANSITIONS: Record<TransitionKind, Record<string, readonly 
     deposit_requested: ["booking_confirmed"],
   },
   paid: {
-    deposit_paid: ["booking_confirmed", "work_completed", "cancelled"], // older deposit bookings only
     booking_confirmed: ["work_completed", "cancelled"],
-    work_completed: ["booking_confirmed", "cancelled"], // undo a mistaken "completed"
-    // cancelled (after payment) is final: refund in Stripe; it can't be reopened
+    work_completed: ["cancelled"],
+    // cancelled (after payment) is final: refund through Stripe; it can't be reopened
   },
 };
 
@@ -47,3 +52,6 @@ export function canChangeStatus(kind: TransitionKind, from: string, to: string):
   if (kind !== "payment" && from === to) return true;
   return STATUS_TRANSITIONS[kind][from]?.includes(to) ?? false;
 }
+
+/** Old deposit-era statuses: shown if ever present, never offered or entered. */
+export const LEGACY_STATUSES: readonly string[] = ["deposit_paid", "balance_paid"];

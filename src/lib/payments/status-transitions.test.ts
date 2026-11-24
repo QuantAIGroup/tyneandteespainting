@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { BOOKING_STATUSES, canSetStatusManually, manualStatusOptions } from "./booking";
-import { STATUS_TRANSITIONS, allowedTransitionKeys, canChangeStatus } from "./status-transitions";
+import { LEGACY_STATUSES, STATUS_TRANSITIONS, allowedTransitionKeys, canChangeStatus } from "./status-transitions";
+import { REFUND_STATUSES, REFUND_STATUS_CHANGES } from "./refunds";
 
 const sql = readFileSync(path.resolve(__dirname, "../../../supabase/migrations/20261123170000_price_revision_full_payment.sql"), "utf8");
 const sqlArray = (name: string) => {
@@ -15,6 +16,11 @@ const ALL = BOOKING_STATUSES.map((s) => s.id);
 describe("booking status changes – app and database agree", () => {
   it("the database allows exactly the same status changes as the app", () => {
     expect([...sqlArray("allowed_transitions")].sort()).toEqual([...allowedTransitionKeys()].sort());
+  });
+
+  it("the database allows exactly the same refund status changes as the app", () => {
+    expect([...sqlArray("allowed_status_changes")].sort()).toEqual([...REFUND_STATUS_CHANGES].sort());
+    expect(sql).toContain(`constraint refunds_status check (status in (${REFUND_STATUSES.map((x) => `'${x}'`).join(", ")}))`);
   });
 
   it("the database knows exactly the same nine statuses as the app", () => {
@@ -48,6 +54,23 @@ describe("booking status changes – rules", () => {
     }
   });
 
+  it("a completed job can't be moved back to confirmed (only cancelled)", () => {
+    expect(canChangeStatus("paid", "work_completed", "booking_confirmed")).toBe(false);
+    expect(canSetStatusManually("booking_confirmed", { status: "work_completed", depositPaid: true })).toBe(false);
+    expect(manualStatusOptions({ status: "work_completed", depositPaid: true })).toEqual(["work_completed", "cancelled"]);
+  });
+
+  it("no booking can enter or leave the old deposit-era statuses", () => {
+    for (const kind of ["unpaid", "payment", "paid"] as const) for (const s of ALL) {
+      for (const legacy of LEGACY_STATUSES) {
+        if (s !== legacy) {
+          expect(canChangeStatus(kind, s, legacy)).toBe(false);
+          expect(canChangeStatus(kind, legacy, s)).toBe(false);
+        }
+      }
+    }
+  });
+
   it("a cancelled paid booking is final", () => {
     for (const to of ALL) if (to !== "cancelled") expect(canChangeStatus("paid", "cancelled", to)).toBe(false);
   });
@@ -55,7 +78,6 @@ describe("booking status changes – rules", () => {
   it("legitimate admin actions are still allowed", () => {
     expect(canSetStatusManually("work_completed", { status: "booking_confirmed", depositPaid: true })).toBe(true);
     expect(canSetStatusManually("cancelled", { status: "booking_confirmed", depositPaid: true })).toBe(true);
-    expect(canSetStatusManually("booking_confirmed", { status: "work_completed", depositPaid: true })).toBe(true);
     expect(canSetStatusManually("cancelled", { status: "work_completed", depositPaid: true })).toBe(true);
     expect(canSetStatusManually("declined", { status: "awaiting_consultation", depositPaid: false })).toBe(true);
     expect(canSetStatusManually("awaiting_consultation", { status: "cancelled", depositPaid: false })).toBe(true);
