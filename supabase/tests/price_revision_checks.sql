@@ -221,7 +221,7 @@ select pg_temp.expect_reject('server deleting a paid booking', $q$delete from pu
 select pg_temp.expect_reject('server TRUNCATE (no privilege)', $q$truncate public.enquiries cascade$q$);
 select pg_temp.expect_reject('admin login TRUNCATE (no privilege)', $q$truncate public.enquiries cascade$q$, '{"role":"authenticated","sub":"00000000-0000-4000-a000-000000000001"}');
 select pg_temp.expect_reject('database owner TRUNCATE while a paid booking exists (e.g. SQL editor)', $q$truncate public.enquiries cascade$q$, '');
-select pg_temp.expect_ok('payment log entry', $q$insert into public.payments (enquiry_id, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind) values ('11111111-1111-4111-a111-111111111111', 'deposit_recorded', 37550, 'gbp', 'cs_1', 'pi_full', 'evt_1', 'full')$q$);
+select pg_temp.expect_ok('payment log entry (new label payment_recorded)', $q$insert into public.payments (enquiry_id, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind) values ('11111111-1111-4111-a111-111111111111', 'payment_recorded', 37550, 'gbp', 'cs_1', 'pi_full', 'evt_1', 'full')$q$);
 select pg_temp.expect_reject('the same Stripe payment logged twice', $q$insert into public.payments (enquiry_id, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind) values ('11111111-1111-4111-a111-111111111111', 'deposit_recorded', 37550, 'gbp', 'cs_1', 'pi_full', 'evt_2', 'full')$q$);
 select pg_temp.expect_reject('the same Stripe payment on a second booking', $q$update public.enquiries set stripe_payment_intent_id = 'pi_full' where reference = 'PRE-2'$q$);
 select case when column_default = '''full''::text' then 'PASS  new payment requests default to full' else 'FAIL  default ' || column_default end
@@ -448,3 +448,11 @@ begin
 end $$;
 select case when pg_temp.admin_photo_count() = (select count(*) from public.enquiry_photos) and pg_temp.admin_photo_count() > 0
   then 'PASS  the admin login can still see every photo record, including the paid booking''s' else 'FAIL  admin photo access' end;
+
+-- ---------------------------------------------------------------- payment log labels
+select case when exists (select 1 from public.payments where stripe_payment_intent_id = 'pi_pre3_early' and outcome = 'needs_review')
+  then 'PASS  historical payment-log entries keep their original labels' else 'FAIL  historical label changed' end;
+select pg_temp.expect_ok('the historical label deposit_recorded is still accepted (older entries stay valid)', $q$insert into public.payments (outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind) values ('deposit_recorded', 100, 'gbp', 'cs_hist', 'pi_hist', 'evt_hist', 'full')$q$);
+select pg_temp.expect_reject('an unknown payment-log label', $q$insert into public.payments (outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id, kind) values ('deposit_taken', 100, 'gbp', 'cs_x', 'pi_x', 'evt_x', 'full')$q$, '{"role":"service_role"}', 'payments_outcome_check');
+select case when col_description('public.enquiries'::regclass, (select attnum from pg_attribute where attrelid = 'public.enquiries'::regclass and attname = 'deposit_pence')) like '%always equals agreed_price_pence (100%%)%'
+  then 'PASS  deposit-era column names are documented in the database as 100% payment fields' else 'FAIL  column comment' end;

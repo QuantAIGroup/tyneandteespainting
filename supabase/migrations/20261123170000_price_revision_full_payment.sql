@@ -1,5 +1,5 @@
 -- =====================================================================
--- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 9, after safety review)
+-- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 10, after concurrency and payment audit)
 -- Run AFTER the earlier migrations.
 --
 -- ALL-OR-NOTHING: the whole migration is ONE statement (a single DO block),
@@ -214,7 +214,7 @@ declare
     'enquiries:enquiries_full_payment_only', 'enquiries:enquiries_full_payment_amount', 'enquiries:enquiries_paid_in_full',
     'enquiries:enquiries_payment_needs_consent', 'enquiries:enquiries_early_start_needs_terms', 'enquiries:enquiries_consent_complete',
     'enquiries:enquiries_consent_fkey', 'quote_rooms:quote_rooms_item_type_check', 'quote_rooms:quote_rooms_extra_shape_check',
-    'payments:payments_stripe_payment_intent_id_key'
+    'payments:payments_stripe_payment_intent_id_key', 'payments:payments_outcome_check'
   ];
   col text;
   col_type text;
@@ -587,6 +587,21 @@ begin
   alter table public.enquiries drop constraint if exists enquiries_consent_complete;
   execute format('alter table public.enquiries add constraint enquiries_consent_complete check (%s)', enquiry_consent_link_rule);
 
+  -- PAYMENT LOG LABEL: new verified payments are logged as 'payment_recorded'
+  -- (100% of the agreed price). 'deposit_recorded' was the label used before
+  -- full payment; it stays valid so any historical entries remain readable.
+  -- The log is append-only, so existing entries are never relabelled.
+  alter table public.payments drop constraint if exists payments_outcome_check;
+  alter table public.payments add constraint payments_outcome_check
+    check (outcome in ('payment_recorded', 'deposit_recorded', 'duplicate_refunded', 'duplicate_refund_failed', 'needs_review'));
+
+  -- Column names from the deposit era are kept (renaming would break the
+  -- application and history); these notes record what they mean now.
+  comment on column public.enquiries.deposit_pence is 'Amount requested online. Under full payment always equals agreed_price_pence (100%).';
+  comment on column public.enquiries.deposit_paid_pence is 'Amount received through Stripe. Under full payment always equals agreed_price_pence.';
+  comment on column public.enquiries.deposit_paid_at is 'When the verified Stripe payment was recorded (full payment).';
+  comment on column public.payments.outcome is 'payment_recorded = verified full payment; deposit_recorded = the same, logged before full payment (historical label); duplicate_refunded / duplicate_refund_failed; needs_review.';
+
   -- ===================================================================
   -- 4. ROOM RECORDS – counted extras, strict shapes
   -- ===================================================================
@@ -796,6 +811,13 @@ begin
   set search_path = ''
   as $fn$
   begin
+    -- CONCURRENCY: when emptying room or photo records, first block changes to
+    -- bookings (SHARE lock) so a payment being recorded right now finishes
+    -- before the check. (TRUNCATE of enquiries itself already holds an
+    -- exclusive lock on it.)
+    if tg_table_name <> 'enquiries' then
+      lock table public.enquiries in share mode;
+    end if;
     if exists (select 1 from public.enquiries where deposit_paid_at is not null) then
       raise exception 'Table % holds data for paid bookings and cannot be truncated', tg_table_name;
     end if;
@@ -836,6 +858,12 @@ begin
   -- afterwards – by anyone, including the website server. Reading them is
   -- unaffected. SECURITY DEFINER so the check always sees the booking,
   -- whatever the caller's row-level access.
+  --
+  -- CONCURRENCY: the check first LOCKS the booking row(s) (FOR SHARE). A
+  -- payment being recorded at the same moment holds an update lock on that
+  -- row, so this change waits until the payment commits or rolls back, then
+  -- re-reads the booking and is refused if it is now paid. In the other order,
+  -- the payment waits for this change to finish. Either way one clear order.
   create or replace function public.protect_paid_booking_records()
   returns trigger
   language plpgsql
@@ -843,6 +871,10 @@ begin
   set search_path = ''
   as $fn$
   begin
+    perform 1 from public.enquiries e
+    where e.id in (case when tg_op <> 'INSERT' then old.enquiry_id end, case when tg_op <> 'DELETE' then new.enquiry_id end)
+    order by e.id
+    for share of e;
     if tg_op in ('UPDATE', 'DELETE')
        and exists (select 1 from public.enquiries where id = old.enquiry_id and deposit_paid_at is not null) then
       raise exception '% of a paid booking cannot be changed or removed', case tg_table_name when 'quote_rooms' then 'Room records' else 'Photo records' end;
@@ -926,7 +958,8 @@ begin
   $fn$;
   revoke all on function public.protect_refund_log() from public, anon, authenticated;
 
-  -- Consent evidence rules (SECURITY DEFINER: the checks must see every row):
+  -- Consent evidence rules (SECURITY DEFINER: the checks must see every row;
+  -- the booking row is locked before checking, see protect_paid_booking_records):
   -- a consent can only be recorded for a booking that is awaiting payment,
   -- for exactly its agreed price; afterwards it can never be changed,
   -- deleted or truncated.
@@ -944,6 +977,9 @@ begin
       return null;
     end if;
     if tg_op = 'INSERT' then
+      -- Lock the booking first (FOR SHARE): a concurrent price change, withdrawal
+      -- or payment finishes before this check reads it
+      perform 1 from public.enquiries e where e.id = new.enquiry_id for share of e;
       if not exists (select 1 from public.enquiries e
                      where e.id = new.enquiry_id and e.status = 'deposit_requested' and e.deposit_paid_at is null
                        and e.agreed_price_pence = new.amount_pence) then
@@ -1153,18 +1189,24 @@ begin
     raise exception 'Verification failed: row-level security is off for %', k;
   end if;
 
-  -- Any OTHER role (custom roles, inherited memberships, pg_write_all_data, ...) that can
-  -- change booking data stops the migration. Allowed: the owner (postgres), the platform
-  -- superuser (supabase_admin), and the two roles checked above.
-  select string_agg(distinct r.rolname || ' (' || t.tbl || ' ' || p.priv || ')', ', ') into k
+  -- No role other than each table's OWNER and superusers may TRUNCATE, add
+  -- triggers to, or (apart from the two application roles checked above) write
+  -- to the booking tables – whatever the roles are called, and including rights
+  -- gained through role membership (e.g. a role granted the owner role or
+  -- pg_write_all_data). Built-in pg_* roles themselves are skipped; any role
+  -- given their rights is still checked.
+  select string_agg(distinct r.rolname || ' (' || c.relname || ' ' || p.priv || ')', ', ') into k
   from pg_roles r
-  cross join (values ('enquiries'), ('quote_rooms'), ('enquiry_photos'), ('payments'), ('refunds'), ('booking_consents')) t(tbl)
+  cross join pg_class c
   cross join (values ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('TRIGGER')) p(priv)
-  where r.rolname not in ('postgres', 'supabase_admin', 'service_role', 'authenticated')
-    and r.rolname !~ '^pg_'   -- built-in roles (e.g. pg_write_all_data); any role GIVEN their rights is still checked
+  where c.oid in ('public.enquiries'::regclass, 'public.quote_rooms'::regclass, 'public.enquiry_photos'::regclass,
+                  'public.payments'::regclass, 'public.refunds'::regclass, 'public.booking_consents'::regclass)
+    and r.oid <> c.relowner
     and not r.rolsuper
-    and (has_table_privilege(r.oid, format('public.%I', t.tbl), p.priv)
-         or (p.priv in ('INSERT', 'UPDATE') and has_any_column_privilege(r.oid, format('public.%I', t.tbl), p.priv)));
+    and r.rolname !~ '^pg_'
+    and not (r.rolname in ('service_role', 'authenticated') and p.priv in ('INSERT', 'UPDATE', 'DELETE'))
+    and (has_table_privilege(r.oid, c.oid, p.priv)
+         or (p.priv in ('INSERT', 'UPDATE') and has_any_column_privilege(r.oid, c.oid, p.priv)));
   if k is not null then
     raise exception 'Verification failed: unexpected roles can change booking data: %', k;
   end if;
@@ -1181,6 +1223,6 @@ begin
   from pg_roles r
   cross join (values ('public.enquiries'), ('public.quote_rooms'), ('public.enquiry_photos'), ('public.payments'), ('public.refunds'), ('public.booking_consents')) t(tbl)
   where has_table_privilege(r.oid, t.tbl::regclass, 'TRUNCATE');
-  raise notice 'Roles able to TRUNCATE booking tables (all subject to the truncate guards): %', coalesce(k, 'none');
+  raise notice 'For information – roles able to TRUNCATE booking tables (only the owner and superusers are allowed; all are subject to the truncate guards): %', coalesce(k, 'none');
 end
 $migration$;

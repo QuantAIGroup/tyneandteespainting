@@ -19,7 +19,7 @@
 import { NextResponse } from "next/server";
 import type Stripe from "stripe";
 import { isUuid } from "@/lib/enquiry";
-import { decideDepositOutcome, statusAfterVerifiedPayment } from "@/lib/payments/booking";
+import { decideDepositOutcome } from "@/lib/payments/booking";
 import { CANCELLATION_SUMMARY, CANCELLATION_TERMS_VERSION, CONSENT_STATEMENTS, COOLING_OFF_DAYS } from "@/config/cancellation";
 import { paidHeadline, paymentLabel } from "@/lib/payments/deposit";
 import { getStripe, verifyStripeWebhook } from "@/lib/payments/stripe";
@@ -27,7 +27,7 @@ import { sendCustomerEmail, sendNotification } from "@/lib/notifications";
 import { formatPence } from "@/lib/pricing/engine";
 import { getBusinessSettings } from "@/lib/settings";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { recordRefund } from "@/lib/payments/refund-record";
+import { RefundMismatchError, recordRefund } from "@/lib/payments/refund-record";
 import { SITE } from "@/config/site";
 
 type Db = NonNullable<ReturnType<typeof createAdminClient>>;
@@ -186,9 +186,9 @@ async function handlePaidSession(
     const { data: updated, error: updateError } = await supabase
       .from("enquiries")
       .update({
-        // Full payment confirms the booking straight away
-        status: statusAfterVerifiedPayment(enquiry.payment_type as string),
-        ...(enquiry.payment_type === "full" ? { booking_confirmed_at: new Date().toISOString() } : {}),
+        // A verified full payment confirms the booking straight away (only full payments reach here)
+        status: "booking_confirmed",
+        booking_confirmed_at: new Date().toISOString(),
         deposit_paid_pence: amountPence,
         deposit_paid_at: new Date().toISOString(),
         stripe_payment_intent_id: paymentIntentId,
@@ -201,7 +201,7 @@ async function handlePaidSession(
       .select("id");
     if (updateError) throw new Error(updateError.message);
     if (updated && updated.length === 1) {
-      await logPayment("deposit_recorded");
+      await logPayment("payment_recorded");
       await sendPaidEmails(enquiry, amountPence, paymentIntentId);
       return;
     }
@@ -272,8 +272,20 @@ async function handleRefund(supabase: Db, refund: Stripe.Refund) {
   const enquiryId = (original.enquiry_id as string | null) ?? null;
   const { data: booking } = enquiryId ? await supabase.from("enquiries").select("reference").eq("id", enquiryId).maybeSingle() : { data: null };
   const source = refund.metadata?.source === "admin" ? "admin" : refund.reason === "duplicate" ? "duplicate_payment" : "stripe_dashboard";
-  const added = await recordRefund(supabase, refund, { enquiryId, source });
   const ref = (booking?.reference as string | undefined) ?? enquiryId ?? paymentIntentId;
+  let added: boolean;
+  try {
+    added = await recordRefund(supabase, refund, { enquiryId, source });
+  } catch (err) {
+    if (!(err instanceof RefundMismatchError)) throw err; // e.g. database unreachable → Stripe retries
+    // Wrong currency, more than was paid, or another booking: don't record it, tell the owner
+    await sendNotification(`⚠ REFUND NEEDS CHECKING – ${ref}`, [
+      `Stripe reported a refund that doesn't match the original payment, so it was NOT recorded: ${err.message}.`,
+      `Please check it in your Stripe dashboard.`,
+      enquiryId ? `Enquiry: ${SITE.url}/admin/enquiries/${enquiryId}` : `Stripe payment: ${paymentIntentId}`,
+    ]);
+    return;
+  }
   if (refund.status === "failed" || refund.status === "canceled") {
     await sendNotification(`⚠ REFUND ${refund.status === "failed" ? "FAILED" : "CANCELLED"} – ${ref}`, [
       `A refund of ${formatPence(refund.amount)} did not go through (Stripe ${refund.id}).`,
@@ -350,11 +362,16 @@ async function refundDuplicate(
   if (logError) throw new Error(logError.message); // Stripe retries; the refund itself is idempotent
   if (refund) {
     // Kept in the refund record, separately from the payment
-    await recordRefund(
+    try {
+      await recordRefund(
       supabase,
       { id: refund.id, amount: refund.amount ?? amountPence, currency: refund.currency ?? "gbp", status: refund.status ?? "pending", reason: refund.reason ?? "duplicate", payment_intent: paymentIntentId },
       { enquiryId: (enquiry.id as string) ?? null, source: "duplicate_payment", note: reason },
     );
+    } catch (err) {
+      if (!(err instanceof RefundMismatchError)) throw err;
+      console.error("Duplicate refund made in Stripe but not recorded", err.message); // the alert below still goes out
+    }
   }
   await sendNotification(
     `${refunded ? "Duplicate payment refunded" : "⚠ DUPLICATE PAYMENT – REFUND FAILED"} – ${enquiry.reference}`,

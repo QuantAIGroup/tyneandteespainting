@@ -9,7 +9,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { Alert } from "@/components/ui/Form";
 import { AgreePriceForm, BalancePaidForm, PaymentLinkControls, RefundForm } from "./PaymentControls";
 import { canChangeStatus } from "@/lib/payments/status-transitions";
-import { refundablePence } from "@/lib/payments/refunds";
+import { RECORDED_PAYMENT_OUTCOMES, refundablePence } from "@/lib/payments/refunds";
 
 const fmtDate = (d: string | null | undefined) => (d ? new Date(d).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "Europe/London" }) : "—");
 
@@ -40,7 +40,8 @@ export async function PaymentPanel({ enquiry, items, estimatePence }: { enquiry:
   // Any duplicate / unusual payments for this booking
   const admin = createAdminClient();
   const { data: payments } = admin ? await admin.from("payments").select("outcome, amount_pence, stripe_payment_intent_id, notes, created_at").eq("enquiry_id", enquiry.id as string).order("created_at") : { data: [] };
-  const problems = (payments ?? []).filter((p) => p.outcome !== "deposit_recorded");
+  // "deposit_recorded" is the historical label for the same thing (before full payment)
+  const problems = (payments ?? []).filter((p) => !RECORDED_PAYMENT_OUTCOMES.includes(p.outcome as string));
   // Refunds are kept in their own record (the original payment is never changed)
   const { data: refundRows } = admin ? await admin.from("refunds").select("stripe_refund_id, stripe_payment_intent_id, amount_pence, status, source, note, created_at").eq("enquiry_id", enquiry.id as string).order("created_at") : { data: [] };
   const refunds = (refundRows ?? []) as { stripe_refund_id: string; stripe_payment_intent_id: string; amount_pence: number; status: string; source: string; note: string | null; created_at: string }[];

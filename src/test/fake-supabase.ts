@@ -115,10 +115,18 @@ class Query implements PromiseLike<{ data: unknown; error: { message: string; co
     const row = this.payload as Row;
     const key = this.upsertOpts.onConflict ?? "id";
     const existing = rows.find((r) => r[key] === row[key]);
+    // Like the real API: with .select(), return the rows actually written
+    // (with ignoreDuplicates, an existing row is skipped and NOT returned)
     if (existing) {
-      if (!this.upsertOpts.ignoreDuplicates) Object.assign(existing, row);
-    } else rows.push({ ...row });
-    return { data: null, error: null };
+      if (!this.upsertOpts.ignoreDuplicates) {
+        Object.assign(existing, row);
+        return { data: this.returning ? [{ ...existing }] : null, error: null };
+      }
+      return { data: this.returning ? [] : null, error: null };
+    }
+    const added = { id: row.id ?? `row_${rows.length + 1}_${Math.random().toString(36).slice(2, 8)}`, ...row };
+    rows.push(added);
+    return { data: this.returning ? [{ ...added }] : null, error: null };
   }
 
   async single() {

@@ -179,16 +179,17 @@ PERM_CASES=("grant truncate on public.payments to authenticated" "grant insert o
   "grant update (notes) on public.payments to anon" "grant insert (enquiry_id) on public.quote_rooms to authenticated"
   "create role tt_custom; grant update on public.enquiries to tt_custom" "create role tt_writer; grant pg_write_all_data to tt_writer"
   "create role tt_member; grant service_role to tt_member; grant delete on public.payments to tt_member"
-  "alter table public.payments disable row level security")
+  "alter table public.payments disable row level security"
+  "create role tt_ownmem; grant postgres to tt_ownmem" "create role tt_trunc; grant truncate on public.payments to tt_trunc")
 [ "$PGVER" -ge 170000 ] && PERM_CASES+=("grant maintain on public.enquiries to authenticated")
 for g in "${PERM_CASES[@]}"; do
-  for r in tt_custom tt_writer tt_member; do $P -d postgres -c "drop database if exists mig_p2" -c "drop role if exists $r" >/dev/null 2>&1 || true; done
+  for r in tt_custom tt_writer tt_member tt_ownmem tt_trunc; do $P -d postgres -c "drop database if exists mig_p2" -c "drop role if exists $r" >/dev/null 2>&1 || true; done
   fresh mig_p2; seed_customers mig_p2; $P -d mig_p2 -c "$g" >/dev/null
   if $P -d mig_p2 -f "$M" >/dev/null 2>/tmp/mig.err; then fail "migration accepted: $g"; fi
   grep -q "Verification failed" /tmp/mig.err || { cat /tmp/mig.err; fail "wrong error for: $g"; }
   if [ "$(q mig_p2 "select count(*) from pg_constraint where conname = 'enquiries_full_payment_only'")" = 0 ]; then pass "'$g' -> stopped and rolled back ($(grep -o 'Verification failed:.*' /tmp/mig.err | cut -c22- | head -1))"; else fail "not rolled back"; fi
 done
-$P -d postgres -c "drop database if exists mig_p2" >/dev/null; for r in tt_custom tt_writer tt_member; do $P -d postgres -c "drop role if exists $r" >/dev/null; done
+$P -d postgres -c "drop database if exists mig_p2" >/dev/null; for r in tt_custom tt_writer tt_member tt_ownmem tt_trunc; do $P -d postgres -c "drop role if exists $r" >/dev/null; done
 fresh mig_p3; seed_customers mig_p3; $P -d mig_p3 -c "create role tt_reader; grant select on public.enquiries to tt_reader" >/dev/null 2>&1 || $P -d mig_p3 -c "grant select on public.enquiries to tt_reader" >/dev/null
 if $P -d mig_p3 -f "$M" >/dev/null 2>&1; then pass "a read-only extra role (like Supabase's read-only and ETL users) does not stop the migration"; else fail "read-only role wrongly stopped the migration"; fi
 $P -d postgres -c "drop database if exists mig_p3" -c "drop role if exists tt_reader" >/dev/null
@@ -226,5 +227,10 @@ $P -d mig_t5 -c "alter table public.refunds alter column currency drop not null"
 if $P -d mig_t5 -f "$M" >/dev/null 2>/tmp/mig.err; then fail "re-run accepted a nullable currency"; fi
 if grep -q "refunds.currency" /tmp/mig.err; then pass "re-run stops when a refund column is made optional (currency), nothing changed"; else cat /tmp/mig.err; fail "wrong error"; fi
 for d in mig_t1 mig_t2 mig_t3 mig_t4 mig_t5 mig_l; do $P -d postgres -c "drop database if exists $d" >/dev/null; done
+
+echo "== 14. Two sessions at once (payment vs room/photo changes, consent, refunds, TRUNCATE)"
+fresh mig_c; seed_customers mig_c; $P -d mig_c -f "$M" >/dev/null
+if CONFIRM_NOT_PRODUCTION=yes PGDATABASE=mig_c supabase/tests/concurrency-tests.sh; then pass "all concurrency tests passed"; else fail "concurrency tests failed"; fi
+$P -d postgres -c "drop database if exists mig_c" >/dev/null
 
 echo "== All migration checks passed"

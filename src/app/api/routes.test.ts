@@ -213,7 +213,7 @@ describe("Stripe webhook – 100% payments", () => {
     const [e] = db.table("enquiries");
     expect(e).toMatchObject({ status: "booking_confirmed", deposit_paid_pence: 37550, stripe_payment_intent_id: "pi_1", stripe_receipt_url: "https://pay.stripe.com/receipts/r1" });
     expect(e.booking_confirmed_at).toBeTruthy();
-    expect(db.table("payments")).toEqual([expect.objectContaining({ outcome: "deposit_recorded", amount_pence: 37550, kind: "full" })]);
+    expect(db.table("payments")).toEqual([expect.objectContaining({ outcome: "payment_recorded", amount_pence: 37550, kind: "full" })]);
     expect(db.table("stripe_events")).toEqual([expect.objectContaining({ id: "evt_1" })]);
     const customerEmail = emails.find((m) => m.to === "sam@example.com")!;
     expect(customerEmail.subject).toContain("confirmed");
@@ -258,7 +258,7 @@ describe("Stripe webhook – 100% payments", () => {
     await send(event({ id: "evt_2", pi: "pi_2" }));
     expect(refunds).toHaveBeenCalledWith({ payment_intent: "pi_2", reason: "duplicate" }, expect.anything());
     expect(db.table("enquiries")[0]).toMatchObject({ status: "booking_confirmed", stripe_payment_intent_id: "pi_1" });
-    expect(db.table("payments").map((p) => p.outcome)).toEqual(["deposit_recorded", "duplicate_refunded"]);
+    expect(db.table("payments").map((p) => p.outcome)).toEqual(["payment_recorded", "duplicate_refunded"]);
   });
 
   it("records the automatic duplicate refund in the refund record, without changing the original payment", async () => {
@@ -412,7 +412,7 @@ describe("Refunds – through Stripe, recorded separately, original payment unto
       payment_type: "full", deposit_paid_at: "2026-11-23T12:00:00Z", deposit_paid_pence: 37550, stripe_payment_intent_id: "pi_paid", stripe_checkout_session_id: "cs_paid",
       cancellation_terms_accepted_at: "2026-11-23T11:59:00Z", consent_id: "con_r",
     });
-    db.table("payments").push({ id: "pay1", enquiry_id: enquiryId, outcome: "deposit_recorded", amount_pence: 37550, currency: "gbp", stripe_payment_intent_id: "pi_paid", stripe_event_id: "evt_paid", kind: "full" });
+    db.table("payments").push({ id: "pay1", enquiry_id: enquiryId, outcome: "payment_recorded", amount_pence: 37550, currency: "gbp", stripe_payment_intent_id: "pi_paid", stripe_event_id: "evt_paid", kind: "full" });
   });
   const snapshot = () => JSON.stringify({ e: db.table("enquiries")[0], p: db.table("payments") });
   const refundEvent = (type: string, o: Record<string, unknown> = {}) => {
@@ -449,6 +449,37 @@ describe("Refunds – through Stripe, recorded separately, original payment unto
     await refundEvent("refund.created", { status: "succeeded" });
     await refundEvent("refund.updated", { status: "pending" });
     expect(db.table("refunds")[0].status).toBe("succeeded");
+  });
+
+  it("a refund in a different currency from the original payment is not recorded; you're alerted", async () => {
+    const before = snapshot();
+    const res = await refundEvent("refund.created", { currency: "eur" });
+    expect(res.status).toBe(200); // handled – Stripe doesn't keep retrying
+    expect(db.table("refunds")).toHaveLength(0);
+    expect(snapshot()).toBe(before);
+    expect(emails.some((m) => m.subject.startsWith("⚠ REFUND NEEDS CHECKING"))).toBe(true);
+  });
+
+  it("a refund that would exceed what's left of the original payment is not recorded; you're alerted", async () => {
+    await refundEvent("refund.created", { id: "re_a", amount: 30000 });
+    const res = await refundEvent("refund.created", { id: "re_b", amount: 7551 });
+    expect(res.status).toBe(200);
+    expect(db.table("refunds").map((r) => r.stripe_refund_id)).toEqual(["re_a"]);
+    expect(emails.some((m) => m.subject.startsWith("⚠ REFUND NEEDS CHECKING"))).toBe(true);
+    await refundEvent("refund.created", { id: "re_c", amount: 7550 }); // exactly the rest is fine
+    expect(db.table("refunds").map((r) => r.stripe_refund_id)).toEqual(["re_a", "re_c"]);
+  });
+
+  it("'refund created (pending)' and 'refund updated (succeeded)' arriving at the same moment end up succeeded, recorded once", async () => {
+    await Promise.all([refundEvent("refund.created", { status: "pending" }), refundEvent("refund.updated", { status: "succeeded" })]);
+    expect(db.table("refunds")).toHaveLength(1);
+    expect(db.table("refunds")[0].status).toBe("succeeded");
+  });
+
+  it("admin refund: Stripe is asked to refund the original payment only – no currency or amount comes from the form except the amount checked above", async () => {
+    await refundPayment(enquiryId, null, form({ amount: "375.50", note: "Cancelled", currency: "usd", payment_intent: "pi_other" }));
+    expect(createRefund).toHaveBeenCalledWith(expect.objectContaining({ payment_intent: "pi_paid", amount: 37550 }), expect.anything());
+    expect(createRefund.mock.calls[0][0]).not.toHaveProperty("currency");
   });
 
   it("ignores refunds of payments this website never took", async () => {
@@ -658,6 +689,36 @@ describe("Stripe checkout – charges exactly 100% of the agreed price", () => {
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ consent_id: c.id, terms_version: CANCELLATION_TERMS_VERSION }) }), expect.anything());
   });
 
+  it("fabricated consent evidence in a crafted request is ignored – wording, version, fingerprint and price come only from the server", async () => {
+    seed();
+    await pay({
+      acceptTerms: "on",
+      statements: JSON.stringify({ acceptTerms: "I agree to pay nothing" }),
+      terms_version: "1999-01-01", terms_sha256: "0".repeat(64), early_start_requested: "true",
+      early_start_ack_pay_for_work: "true", consent_id: "c0000000-0000-4000-a000-000000000099", amount_pence: "1", agreedPricePence: "1",
+      user_agent: "forged",
+    });
+    const c = db.table("booking_consents")[0];
+    expect(c).toMatchObject({ terms_version: CANCELLATION_TERMS_VERSION, terms_sha256: TERMS_FINGERPRINTS[CANCELLATION_TERMS_VERSION], early_start_requested: false, early_start_ack_pay_for_work: false, amount_pence: 37550 });
+    expect(c.statements).toEqual({ acceptTerms: CONSENT_STATEMENTS.acceptTerms });
+    expect(c.id).not.toBe("c0000000-0000-4000-a000-000000000099");
+    expect(db.table("enquiries")[0].consent_id).toBe(c.id);
+  });
+
+  it("acknowledgements ticked without an early-start request are not recorded as an early-start request", async () => {
+    seed();
+    await pay({ acceptTerms: "on", ackPayForWork: "on", ackLosesRight: "on" });
+    expect(db.table("booking_consents")[0]).toMatchObject({ early_start_requested: false, early_start_ack_pay_for_work: false, early_start_ack_loses_right: false });
+    expect(db.table("enquiries")[0].early_start_requested_at).toBeNull();
+  });
+
+  it("a box only counts when ticked ('on'): other values for the early-start boxes are refused", async () => {
+    seed();
+    const res = await pay({ acceptTerms: "on", earlyStart: "on", ackPayForWork: "yes", ackLosesRight: "true" });
+    expect(res.headers.get("location")).toContain("error=earlystart");
+    expect(db.table("booking_consents")).toHaveLength(0);
+  });
+
   it("if the consent evidence can't be saved, no payment page is opened", async () => {
     seed();
     db.failInsertOn.add("booking_consents");
@@ -707,6 +768,15 @@ describe("Stripe checkout – charges exactly 100% of the agreed price", () => {
     expect(res.headers.get("location")).toBe("https://checkout.stripe.com/c/cs_new");
     expect(db.table("enquiries")[0].stripe_checkout_session_id).toBe("cs_new");
     Object.assign(stripe.checkout.sessions, { retrieve: vi.fn(), expire: vi.fn() });
+  });
+
+  it("the Stripe page is created in GBP for exactly the agreed price, as one item", async () => {
+    seed();
+    await pay({ acceptTerms: "on", amount: "1", currency: "usd", unit_amount: "100" });
+    const params = create.mock.calls[0][0] as { currency: string; line_items: { quantity: number; price_data: { currency: string; unit_amount: number } }[] };
+    expect(params.currency).toBe("gbp");
+    expect(params.line_items).toHaveLength(1);
+    expect(params.line_items[0]).toMatchObject({ quantity: 1, price_data: { currency: "gbp", unit_amount: 37550 } });
   });
 
   it("only an actual tick counts as accepting the terms", async () => {

@@ -5,6 +5,9 @@
  * method. Each one is kept in its own record (public.refunds); the original
  * payment record is never changed or deleted.
  */
+/** Payment-log outcomes meaning "verified payment recorded" (the second is the historical label). */
+export const RECORDED_PAYMENT_OUTCOMES: readonly string[] = ["payment_recorded", "deposit_recorded"];
+
 export const REFUND_STATUSES = ["pending", "requires_action", "succeeded", "failed", "canceled"] as const;
 export type RefundStatus = (typeof REFUND_STATUSES)[number];
 

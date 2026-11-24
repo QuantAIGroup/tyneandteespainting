@@ -46,6 +46,7 @@ export const MAX_AGREED_PRICE_PENCE = 50_000_00;
  * always adds up to the agreed price exactly. Integer maths only – the database
  * uses the identical formula: (price × percent + 99) ÷ 100.
  */
+/** @deprecated Deposit-era calculation. Not used by the website any more (100% payment only); kept only for its historical tests. */
 export function calculateDeposit(agreedPricePence: number, percent: number = DEFAULT_DEPOSIT_PERCENT): { depositPence: number; balancePence: number } {
   if (!Number.isInteger(agreedPricePence) || agreedPricePence <= 0) {
     throw new Error("Agreed price must be a positive whole number of pence");
@@ -62,6 +63,7 @@ export function calculateDeposit(agreedPricePence: number, percent: number = DEF
  *  - custom:  an amount you type (must be between 1p and the agreed price)
  * Returns null if the request isn't valid.
  */
+/** @deprecated Deposit-era calculation. Not used by the website any more (100% payment only); kept only for its historical tests. */
 export function calculatePaymentRequest(input: {
   agreedPricePence: number;
   type: PaymentType;
