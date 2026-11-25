@@ -803,6 +803,7 @@ describe("Stripe checkout – charges exactly 100% of the agreed price", () => {
     await pay({ acceptTerms: "on", amount: "1", currency: "usd", unit_amount: "100" });
     const params = create.mock.calls[0][0] as { currency: string; line_items: { quantity: number; price_data: { currency: string; unit_amount: number } }[] };
     expect(params.currency).toBe("gbp");
+    expect((params as unknown as { adaptive_pricing: { enabled: boolean } }).adaptive_pricing).toEqual({ enabled: false }); // customer can't be charged in another currency
     expect(params.line_items).toHaveLength(1);
     expect(params.line_items[0]).toMatchObject({ quantity: 1, price_data: { currency: "gbp", unit_amount: 37550 } });
   });

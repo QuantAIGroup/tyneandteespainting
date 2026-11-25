@@ -62,7 +62,7 @@ where (p.outcome in ('payment_recorded', 'deposit_recorded') or r.source = 'admi
 | 3.1 | Agree a final price (e.g. £375.50) and send the payment link | Status "Payment requested"; the customer email contains the link |
 | 3.2 | Open the link and press Pay **without** ticking the terms box | The browser won't submit (the box is required). The server refuses such a request too – covered by automated tests |
 | 3.3 | Tick the terms and "start within 14 days", but **not** the two acknowledgements, and press Pay | Back on the page with: "To ask us to start within 14 days, please also tick both boxes…"; no Stripe page; no consent record |
-| 3.4 | Tick the terms only and press Pay | Stripe page shows **exactly £375.50**, in **GBP**, as one item |
+| 3.4 | Tick the terms only and press Pay | Stripe page shows **exactly £375.50**, in **GBP**, as one item. Customers are always charged in pounds: the app turns off Stripe's automatic local-currency conversion for every payment page, so even a test from a non-UK card or location shows £ |
 | 3.5 | In staging, look at the newest `booking_consents` row | `terms_version` = current version, a 64-character `terms_sha256`, `statements` containing **only** the terms box wording, exactly as shown on the page, `amount_pence` 37550, `early_start_requested` false; the booking's `consent_id` points to it |
 
 ## 4. Payments that must NOT confirm a booking
@@ -105,34 +105,79 @@ Use the booking paid in 5.1 (£375.50) unless stated.
 | 7.5 | New booking: pay with `4000 0000 0000 5126`, then refund it from the admin area | The refund record starts `succeeded`; a few minutes later Stripe reports it failed: the record becomes `failed` and you get **one** "⚠ REFUND FAILED – <reference>" email (even though Stripe sends both `refund.updated` and `refund.failed`) |
 | 7.6 | New booking: pay with the card Stripe's testing page lists under **Refunds → asynchronous success**, then refund it | The record starts `pending`, then becomes `succeeded`; no email |
 
-## 8. Two things at the same moment (concurrency)
+## 8. Two things at the same moment (concurrency) and refund limits
 
-Run the concurrency script against **staging** from your computer, using the staging database's **direct** connection (Supabase → Connect → Direct connection) as `postgres`. It refuses to run unless both confirmations are set, and always refuses the production project (`dttbrxbkqrgxalhsxhml`), whatever else is set:
+Run `supabase/tests/concurrency-tests.sh` against **staging** from your computer, using the staging database's **direct** connection (Supabase → Connect → Direct connection) as `postgres`.
 
 ```bash
 export PGHOST=<staging host> PGPORT=5432 PGUSER=postgres PGDATABASE=postgres PGPASSWORD=<staging password>
 CONFIRM_NOT_PRODUCTION=yes CONFIRM_DATABASE="$PGHOST/$PGDATABASE" supabase/tests/concurrency-tests.sh
 ```
 
-- **Test run ID.** Each run prints a unique ID (or use your own with `TEST_RUN_ID=…`, 6–40 letters/digits). Every booking it creates carries that ID: reference `CT-<run id>-<nn>`, email `concurrency-test+<run id>@example.invalid`, and admin notes "Concurrency test run <run id>: <test name>".
-- **Listing (read-only):** `supabase/tests/concurrency-tests.sh --list <run id>` shows that run's bookings; `--list-runs` lists every run with its number of bookings.
-- **Nothing is deleted.** Paid test bookings stay in staging; the paid-booking protections are not relaxed for tests.
-- **Results.** Each test prints PASS, or FAIL with the reason (for example "session B did NOT wait for session A", "session B SUCCEEDED but should have been refused", or the database error if a setup statement failed). The script waits for both sessions of every test, removes its temporary files on exit (also on failure or Ctrl-C), and ends with a summary listing any failed tests. Exit code 0 = all passed, 1 = a test failed, 2 = refused to run or setup problem.
-- **Interrupted runs.** If you press Ctrl-C mid-test, the change still open in session A is rolled back by the database (nothing half-done is kept); its connection closes within a few seconds.
+**What it refuses to do (exit code 2, before any test runs):**
 
-Each test holds one change open for 4 seconds in session A, starts session B, checks that B is made to **wait**, and then checks the result:
+- Run without `PGHOST` and `PGDATABASE` set explicitly.
+- Run while `PGSERVICE`, `PGSERVICEFILE` or `PGHOSTADDR` is set, because each of these could send the connection somewhere other than the host and database you confirmed.
+- Touch the production project: it refuses if `dttbrxbkqrgxalhsxhml` (or any ref listed in `EXTRA_PRODUCTION_REFS`) appears in `PGHOST`, `PGDATABASE` or `PGUSER`, whatever else is set.
+- Run tests without **both** confirmations: `CONFIRM_NOT_PRODUCTION=yes` and `CONFIRM_DATABASE` set to exactly `<PGHOST>/<PGDATABASE>`.
+- Carry on when it can't connect. It shows the first line of the database error.
+- Run on a database without the full-payment migration.
+- Reuse a test run ID that already has bookings.
+
+Its production protection works by name. If you connect to production through an IP address or a custom host name that doesn't contain the project ref, only your two confirmations stand in the way, so always copy the host from the **staging** project.
+
+**Test run ID.** Each run prints a unique ID: the UTC time plus random characters. You can also choose your own with `TEST_RUN_ID=…` (6–40 letters/digits). Every booking the run creates carries that ID in three places:
+
+- reference `CT-<run id>-<nn>`
+- email `concurrency-test+<run id>@example.invalid`
+- admin notes "Concurrency test run <run id>: <test name>"
+
+**Listing (read-only, needs no confirmations):** `supabase/tests/concurrency-tests.sh --list <run id>` shows that run's bookings. `--list-runs` lists every run with its number of bookings.
+
+**Nothing is deleted.** Paid test bookings stay in staging, and the paid-booking protections are not relaxed for tests. Filter them out by the email or the `CT-` reference.
+
+**How it reports:**
+
+- **Per test.** Each test prints PASS, or FAIL with every reason, for example:
+  - "session B did NOT wait for session A"
+  - "session B SUCCEEDED but should have been refused"
+  - "final state wrong"
+  - the database error, if a setup statement failed
+- **Waiting.** It waits for every session it starts, and detects waiting as a real lock wait in the database, not by timing.
+- **Summary.** It lists the run's bookings and ends with the totals.
+- **Exit code.** 0 means all passed, 1 means a test failed, 2 means it refused to run or couldn't set up.
+- **Clean-up.** It stops its background sessions and removes its temporary files on exit, including after a failure or Ctrl-C.
+
+**Interrupted runs.** If you press Ctrl-C mid-test, the database rolls back the change still open in session A, so nothing half-done is kept. Its connection closes within a few seconds.
+
+### Concurrency tests (10)
+
+In each test, session A holds a change open for about 4 seconds without committing. Session B (and, in one test, C) then starts. The script checks that B is made to **wait**, how each session ended, and the final state.
 
 | Session A (open) | Session B | Expected |
 |---|---|---|
-| Payment being recorded | Delete / change / add a room record | B waits, then is refused; booking paid, its room record unchanged |
-| Payment being recorded | Delete / add a photo record | B waits, then is refused; photo records unchanged |
-| Room record being deleted | Payment recorded | The payment waits, then succeeds (one clear order) |
+| Payment being recorded | Delete / change / add a room record (3 tests) | B waits, then is refused; booking paid, room records unchanged |
+| Payment being recorded | Delete / add a photo record (2 tests) | B waits, then is refused; photo records unchanged |
+| Room record being changed | Payment recorded | The payment waits, then succeeds (one clear order) |
 | Payment request being withdrawn | Consent recorded | Consent waits, then is refused ("awaiting payment") |
 | Price being changed | Consent recorded for the old price | Consent waits, then is refused |
-| £150 refund of a £200 payment | Another £150 refund | The second waits, then is refused ("exceed the original payment"); total £150 |
-| Payment being recorded | TRUNCATE of room / photo records | TRUNCATE waits, then is refused; records intact |
+| Payment being recorded | TRUNCATE of room records / of photo records (2 tests) | TRUNCATE waits, then is refused; records intact |
 
-Expected last line: `== All concurrency tests passed (11) – test run <run id>`.
+### Refund-limit tests (7)
+
+Each test uses a fresh paid test booking. Steps run in order, and each must give exactly the result shown. "Reserved" means the amount that counts against the original payment.
+
+| Test | Steps → expected | Final check |
+|---|---|---|
+| C1 Pending refunds reserve the amount (£375.50 paid) | £300 pending → accepted · £100 → **refused** (would exceed) · £75.50 → accepted · 1p → **refused** | Reserved £375.50 exactly |
+| C2 A failed refund releases its amount (£375.50) | £300 pending → accepted · £375.50 → **refused** · mark the £300 **failed** → accepted · £375.50 → accepted · failed → pending → **refused** (failed is final) | Failed record still kept; reserved £375.50 |
+| C3 A cancelled refund releases its amount (£375.50) | As C2, but the £300 is marked **cancelled** | Cancelled record kept; reserved £375.50 |
+| C4 Succeeded refunds keep counting (£375.50) | £300 succeeded → accepted · £100 → **refused** · £75.50 → accepted · succeeded → pending → **refused** · succeeded → failed (Stripe reports a late failure) → accepted · £300 → accepted | Reserved £375.50 |
+| C5 Three refunds at once (£300 paid) | A: £150 held open; B and C: £150 each at the same moment | B and C **both wait**; then one is accepted and one **refused**; total £300, never more |
+| C6 A refund being released at the same moment (£300) | A: marks a £300 pending refund failed, not yet committed; B: £200 | B is **refused at once, without waiting**. This is deliberately cautious: the database counts the £300 until the release is committed. After the commit, £200 → accepted; reserved £200 |
+| C7 Two refunds at once (£200 paid) | A: £150 held open; B: £150 | B waits, then is refused ("exceed the original payment"); total £150 |
+
+Expected last line: `== All concurrency tests passed (17 of 17) – test run <run id>`. Keep the run ID with your notes.
 
 ## 9. Things that must be refused (staging SQL editor)
 
@@ -154,7 +199,7 @@ The SQL editor runs as `postgres`, the table owner. Each statement must fail wit
 
 Production can be considered only when **all** of these are true:
 
-- Every row in sections 1–9 behaved as expected on staging, including `== All concurrency tests passed (11)` – keep the test run ID with your notes.
+- Every row in sections 1–9 behaved as expected on staging, including `== All concurrency tests passed (17 of 17)` – keep the test run ID with your notes.
 - The TRUNCATE check (1.4) and the GBP check (1.8) returned no rows.
 - The webhook endpoint's API version is `2024-10-28.acacia` or later.
 - The migration ran twice on staging without errors.

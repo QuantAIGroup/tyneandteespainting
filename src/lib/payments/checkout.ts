@@ -75,6 +75,9 @@ export async function createDepositCheckout(stripe: Stripe, input: DepositChecko
     {
       mode: "payment",
       currency: "gbp",
+      // GBP only: never let Stripe convert the price into the customer's local currency
+      // (Stripe switches Adaptive Pricing on for Checkout by default; this overrides the dashboard setting)
+      adaptive_pricing: { enabled: false },
       line_items: [
         {
           quantity: 1,
