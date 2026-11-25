@@ -1,5 +1,5 @@
 -- =====================================================================
--- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 10, after concurrency and payment audit)
+-- PRICE REVISION, EXTRAS AND 100% PAYMENT  (revision 11, GBP rules for business payments)
 -- Run AFTER the earlier migrations.
 --
 -- ALL-OR-NOTHING: the whole migration is ONE statement (a single DO block),
@@ -177,6 +177,7 @@ declare
     $c$booking_consents|booking_consents_terms_accepted|c|CHECK ((accepted_terms IS TRUE))$c$,
     $c$booking_consents|booking_consents_user_agent|c|CHECK (((user_agent IS NULL) OR (length(user_agent) <= 500)))$c$,
     $c$booking_consents|booking_consents_version_format|c|CHECK ((terms_version ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}(\.[0-9]{1,3}){0,1}$'::text))$c$,
+    $c$refunds|refunds_admin_in_gbp|c|CHECK (((source <> 'admin'::text) OR (currency = 'gbp'::text)))$c$,
     $c$refunds|refunds_admin_needs_booking|c|CHECK (((source <> 'admin'::text) OR (enquiry_id IS NOT NULL)))$c$,
     $c$refunds|refunds_amount|c|CHECK (((amount_pence >= 1) AND (amount_pence <= 5000000)))$c$,
     $c$refunds|refunds_currency|c|CHECK ((currency ~ '^[a-z]{3}$'::text))$c$,
@@ -214,7 +215,8 @@ declare
     'enquiries:enquiries_full_payment_only', 'enquiries:enquiries_full_payment_amount', 'enquiries:enquiries_paid_in_full',
     'enquiries:enquiries_payment_needs_consent', 'enquiries:enquiries_early_start_needs_terms', 'enquiries:enquiries_consent_complete',
     'enquiries:enquiries_consent_fkey', 'quote_rooms:quote_rooms_item_type_check', 'quote_rooms:quote_rooms_extra_shape_check',
-    'payments:payments_stripe_payment_intent_id_key', 'payments:payments_outcome_check'
+    'payments:payments_stripe_payment_intent_id_key', 'payments:payments_outcome_check', 'payments:payments_recorded_in_gbp',
+    'refunds:refunds_admin_in_gbp'
   ];
   col text;
   col_type text;
@@ -286,6 +288,20 @@ begin
   from (select reference, status from public.enquiries where status in ('deposit_paid', 'balance_paid') order by reference limit 20) x;
   if n > 0 then
     raise exception 'Stopped: bookings use the old deposit-era statuses: %. Review them before migrating. Nothing was changed.', k;
+  end if;
+
+  -- 0g. GBP. The business takes payment in GBP only. Every VERIFIED payment
+  --     already in the payment log must be in GBP before the GBP rule is added
+  --     (step 3). Entries logged for review or refunded as duplicates may be in
+  --     another currency – they record what Stripe actually received – and are
+  --     left alone. Nothing is changed: anything unexpected stops the migration.
+  select count(*), string_agg(format('%s (%s, %s)', stripe_payment_intent_id, outcome, coalesce(currency, 'no currency')), ', ')
+    into n, k
+  from (select stripe_payment_intent_id, outcome, currency from public.payments
+        where outcome in ('payment_recorded', 'deposit_recorded') and currency is distinct from 'gbp'
+        order by created_at limit 20) x;
+  if n > 0 then
+    raise exception 'Stopped: recorded payments that are not in GBP: %. Nothing was changed.', k;
   end if;
 
   -- 0a. Price list: exists, is an object, every group well-formed.
@@ -474,6 +490,18 @@ begin
   create index if not exists refunds_enquiry_idx on public.refunds (enquiry_id);
   create index if not exists refunds_payment_idx on public.refunds (stripe_payment_intent_id);
 
+  -- GBP: refunds made from the admin area are refunds of a booking's GBP
+  -- payment, so they must be in GBP. Added with ALTER (not inside CREATE TABLE)
+  -- so a refunds table from an earlier run gets it too; existing rows are
+  -- checked first and nothing is changed if any don't comply.
+  select count(*), string_agg(stripe_refund_id || ' (' || currency || ')', ', ') into n, k
+  from (select stripe_refund_id, currency from public.refunds where source = 'admin' and currency is distinct from 'gbp' limit 20) x;
+  if n > 0 then
+    raise exception 'Stopped: refunds made from the admin area that are not in GBP: %. Nothing was changed.', k;
+  end if;
+  alter table public.refunds drop constraint if exists refunds_admin_in_gbp;
+  alter table public.refunds add constraint refunds_admin_in_gbp check (source <> 'admin' or currency = 'gbp');
+
   -- The two tables must now be EXACTLY as defined above. If either existed
   -- before (CREATE TABLE IF NOT EXISTS leaves an existing table untouched)
   -- and differs in any column, NOT NULL setting, constraint or index, stop.
@@ -594,6 +622,12 @@ begin
   alter table public.payments drop constraint if exists payments_outcome_check;
   alter table public.payments add constraint payments_outcome_check
     check (outcome in ('payment_recorded', 'deposit_recorded', 'duplicate_refunded', 'duplicate_refund_failed', 'needs_review'));
+
+  -- GBP: a verified business payment is always in GBP (checked against existing entries in step 0g).
+  -- Refunds of it are then GBP too, because every refund must match its original payment's currency.
+  alter table public.payments drop constraint if exists payments_recorded_in_gbp;
+  alter table public.payments add constraint payments_recorded_in_gbp
+    check (outcome not in ('payment_recorded', 'deposit_recorded') or currency = 'gbp');
 
   -- Column names from the deposit era are kept (renaming would break the
   -- application and history); these notes record what they mean now.

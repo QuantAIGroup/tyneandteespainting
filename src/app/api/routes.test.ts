@@ -281,6 +281,26 @@ describe("Stripe webhook – 100% payments", () => {
     expect(db.table("payments")).toHaveLength(0);
   });
 
+  it("if the payment-log entry can't be written, Stripe is asked to retry, and the retry writes it", async () => {
+    db.failInsertOn.add("payments");
+    const first = await send(event({}));
+    expect(first.status).toBe(500);
+    expect(db.table("enquiries")[0]).toMatchObject({ status: "booking_confirmed", stripe_payment_intent_id: "pi_1" });
+    expect(db.table("payments")).toHaveLength(0);
+    db.failInsertOn.delete("payments");
+    const retry = await send(event({}));
+    expect(retry.status).toBe(200);
+    expect(db.table("payments")).toEqual([expect.objectContaining({ outcome: "payment_recorded", stripe_payment_intent_id: "pi_1", amount_pence: 37550, currency: "gbp" })]);
+    expect(refunds).not.toHaveBeenCalled();
+  });
+
+  it("the currency is logged in Stripe's lowercase form even if sent in capitals", async () => {
+    const e = event({});
+    e.data.object.currency = "GBP";
+    await send(e);
+    expect(db.table("payments")[0]).toMatchObject({ outcome: "payment_recorded", currency: "gbp" });
+  });
+
   it("two DIFFERENT payments at the same moment: one confirms the booking, only the other is refunded", async () => {
     await Promise.all([send(event({})), send(event({ id: "evt_2", pi: "pi_2" }))]);
     const e = db.table("enquiries")[0];
@@ -443,6 +463,14 @@ describe("Refunds – through Stripe, recorded separately, original payment unto
     expect(db.table("refunds")).toHaveLength(1);
     expect(db.table("refunds")[0].status).toBe("failed");
     expect(emails.some((m) => m.subject.includes("REFUND FAILED"))).toBe(true);
+  });
+
+  it("a failed refund alerts you once, even when Stripe sends both 'refund.updated' and 'refund.failed'", async () => {
+    await refundEvent("refund.created", { status: "succeeded" });
+    await refundEvent("refund.updated", { status: "failed" });
+    await refundEvent("refund.failed", { status: "failed" });
+    expect(db.table("refunds")[0].status).toBe("failed");
+    expect(emails.filter((m) => m.subject.includes("REFUND FAILED"))).toHaveLength(1);
   });
 
   it("a finished refund's outcome isn't overwritten by a later, out-of-order event", async () => {

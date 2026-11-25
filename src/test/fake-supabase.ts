@@ -114,6 +114,7 @@ class Query implements PromiseLike<{ data: unknown; error: { message: string; co
     // upsert
     const row = this.payload as Row;
     const key = this.upsertOpts.onConflict ?? "id";
+    if (this.db.failInsertOn.has(this.name)) return { data: null, error: { message: `upsert into ${this.name} failed` } };
     const existing = rows.find((r) => r[key] === row[key]);
     // Like the real API: with .select(), return the rows actually written
     // (with ignoreDuplicates, an existing row is skipped and NOT returned)

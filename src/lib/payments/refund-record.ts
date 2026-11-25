@@ -21,9 +21,12 @@ type RefundLike = Pick<Stripe.Refund, "id" | "amount" | "currency" | "status" | 
  *  - all refunds of that payment together (except failed/cancelled ones) don't exceed it.
  * Safe to call more than once, and at the same time, for the same refund: the
  * first call adds it; any call applies only Stripe's genuine status changes.
- * Returns true if this call added a new record.
+ * Returns whether this call added the record, and whether it moved the record to a new status
+ * (so callers alert once per change, not once per Stripe notice).
  */
-export async function recordRefund(supabase: Db, refund: RefundLike, ctx: { enquiryId: string | null; source: RefundSource; note?: string | null }): Promise<boolean> {
+export type RefundRecordResult = { added: boolean; statusChanged: boolean };
+
+export async function recordRefund(supabase: Db, refund: RefundLike, ctx: { enquiryId: string | null; source: RefundSource; note?: string | null }): Promise<RefundRecordResult> {
   const paymentIntentId = typeof refund.payment_intent === "string" ? refund.payment_intent : (refund.payment_intent?.id ?? null);
   if (!paymentIntentId) throw new RefundMismatchError(`Refund ${refund.id} has no payment reference`);
   const status = refundStatus(refund.status);
@@ -47,6 +50,7 @@ export async function recordRefund(supabase: Db, refund: RefundLike, ctx: { enqu
   const { data: existing, error: readError } = await supabase.from("refunds").select("status").eq("stripe_refund_id", refund.id).maybeSingle();
   if (readError) throw new Error(readError.message);
   let added = false;
+  let statusChanged = false;
   if (!existing) {
     if (isActiveRefund(status)) {
       const { data: others, error: othersError } = await supabase.from("refunds").select("amount_pence, status").eq("stripe_payment_intent_id", paymentIntentId);
@@ -92,7 +96,10 @@ export async function recordRefund(supabase: Db, refund: RefundLike, ctx: { enqu
       .eq("status", from)
       .select("id");
     if (error) throw new Error(error.message);
-    if ((changed ?? []).length === 1) break;
+    if ((changed ?? []).length === 1) {
+      statusChanged = true;
+      break;
+    }
   }
-  return added;
+  return { added, statusChanged };
 }

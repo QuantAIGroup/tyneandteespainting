@@ -1,4 +1,4 @@
-# Staging test plan – full payment, consent, refunds and concurrency (migration revision 10)
+# Staging test plan – full payment, consent, refunds and concurrency (migration revision 11)
 
 Run everything here on a **staging** copy. Never on production. Use **Stripe test mode only** (keys starting `sk_test_` / `pk_test_`), Stripe's test card numbers, and no real customers.
 
@@ -20,8 +20,9 @@ Every expected result below matches the current code: `src/app/api/pay/[token]/c
 | 1.3 | Change one price in the admin settings, then **run the last migration again** | Succeeds again; your changed price is kept |
 | 1.4 | Run the TRUNCATE check below in the staging SQL editor | **No rows.** Only each table's owner and superusers may TRUNCATE; the migration enforces the same rule and would have stopped otherwise |
 | 1.5 | Vercel preview: staging Supabase URL/keys, Stripe **test** keys | – |
-| 1.6 | Stripe (test mode) → Developers → Webhooks: endpoint `https://<preview>/api/stripe/webhook`, events `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `refund.created`, `refund.updated`, `refund.failed`; put its signing secret in `STRIPE_WEBHOOK_SECRET` | – |
+| 1.6 | Stripe (test mode) → Developers → Webhooks: endpoint `https://<preview>/api/stripe/webhook`, events `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `refund.created`, `refund.updated`, `refund.failed`. **Choose API version `2024-10-28.acacia` or later** – ideally the app's own, `2026-11-18.endive`. Put the endpoint's signing secret in `STRIPE_WEBHOOK_SECRET` | The endpoint page shows that API version. With an older version, Stripe sends no `refund.*` events for card refunds, so refunds made in the Stripe dashboard would never be recorded (the app logs an error on every event if this happens) |
 | 1.7 | Add your admin login to `admin_users` on staging | – |
+| 1.8 | Run the GBP check below in the staging SQL editor (again after section 7) | **No rows.** Every verified payment, and every refund made from the admin area, is in GBP (the database also enforces this) |
 
 TRUNCATE check (1.4) – it lists every role, whatever it is called, that could empty a protected table without being its owner or a superuser:
 
@@ -34,6 +35,17 @@ where c.oid in ('public.enquiries'::regclass, 'public.quote_rooms'::regclass, 'p
   and has_table_privilege(r.oid, c.oid, 'TRUNCATE')
   and r.oid <> c.relowner
   and not r.rolsuper;
+```
+
+GBP check (1.8):
+
+```sql
+select 'payment' as record, stripe_payment_intent_id as reference, outcome as detail, currency
+from public.payments where outcome in ('payment_recorded', 'deposit_recorded') and currency <> 'gbp'
+union all
+select 'refund', r.stripe_refund_id, r.source, r.currency
+from public.refunds r join public.payments p using (stripe_payment_intent_id)
+where (p.outcome in ('payment_recorded', 'deposit_recorded') or r.source = 'admin') and r.currency <> 'gbp';
 ```
 
 ## 2. Quotes and photos
@@ -78,7 +90,7 @@ Two browser tabs share the same Stripe page, so they can't produce a second paym
 
 | # | Do this | Expected |
 |---|---|---|
-| 6.1 | `stripe trigger checkout.session.completed --add checkout_session:metadata.kind=full --add checkout_session:metadata.enquiry_id=<paid booking id>` | The booking is unchanged; a payment-log entry `duplicate_refunded` for the CLI payment; a refund record with source `duplicate_payment`; Stripe shows the CLI payment refunded; you get an alert email |
+| 6.1 | `stripe trigger checkout.session.completed --add checkout_session:metadata.kind=full --add checkout_session:metadata.enquiry_id=<paid booking id>` | The booking is unchanged. A payment-log entry `duplicate_refunded` for the CLI payment, in **the CLI payment's own currency** (the CLI's sample checkout may not be GBP – a duplicate is logged and refunded exactly as Stripe took it). A refund record with source `duplicate_payment` in that same currency. Stripe shows the CLI payment refunded. An email "Duplicate payment refunded – <reference>" |
 
 ## 7. Refunds and cancellation
 
@@ -86,21 +98,27 @@ Use the booking paid in 5.1 (£375.50) unless stated.
 
 | # | Do this | Expected |
 |---|---|---|
-| 7.1 | Admin → booking → "Refund through Stripe": £100, with a reason | Stripe shows a £100 refund to the original card; refund record with source `admin`; the payment-log entry and the booking's payment details are unchanged |
+| 7.1 | Admin → booking → "Refund through Stripe": £100, with a reason | The admin page says "Refunded: £100.00 back to the customer's original payment method…" (or "Refund pending: …" if Stripe hasn't finished it yet). Stripe shows a £100 refund to the original card. A refund record with source `admin`, currency `gbp`. The payment-log entry and the booking's payment details are unchanged. No email to you (you made it); Stripe's own refund notice to the webhook changes nothing |
 | 7.2 | Try to refund £300 (more than the remaining £275.50) | Refused with "You can refund at most…"; Stripe isn't called |
-| 7.3 | Refund £50 directly in the Stripe dashboard | A refund record with source `stripe_dashboard` appears; you get a "Refund recorded" email |
+| 7.3 | Refund £50 directly in the Stripe dashboard, choosing the reason "Requested by customer" | A refund record with source `stripe_dashboard` appears; you get a "Refund recorded – <reference>" email. (If you pick the reason "Duplicate", it is recorded with source `duplicate_payment` and no email is sent) |
 | 7.4 | Refund the remaining £225.50 from the admin area with "Also mark the booking as cancelled" ticked | Fully refunded; status "Cancelled"; the status menu offers no other status |
-| 7.5 | New booking: pay with `4000 0000 0000 5126`, then refund it from the admin area | The refund first shows "succeeded"; a few minutes later Stripe reports it failed: the record becomes `failed` and you get a "REFUND FAILED" email |
-| 7.6 | New booking: pay with `4000 0000 0000 7726`, then refund it | The record starts `pending`, then becomes `succeeded` |
+| 7.5 | New booking: pay with `4000 0000 0000 5126`, then refund it from the admin area | The refund record starts `succeeded`; a few minutes later Stripe reports it failed: the record becomes `failed` and you get **one** "⚠ REFUND FAILED – <reference>" email (even though Stripe sends both `refund.updated` and `refund.failed`) |
+| 7.6 | New booking: pay with the card Stripe's testing page lists under **Refunds → asynchronous success**, then refund it | The record starts `pending`, then becomes `succeeded`; no email |
 
 ## 8. Two things at the same moment (concurrency)
 
-Run the concurrency script against **staging** from your computer. It creates its own test bookings (reference `CT-…`, email `concurrency-test@example.invalid`), never deletes anything, and its paid test bookings stay in staging by design. Use the staging database's **direct** connection (Supabase → Connect → Direct connection), as `postgres`:
+Run the concurrency script against **staging** from your computer, using the staging database's **direct** connection (Supabase → Connect → Direct connection) as `postgres`. It refuses to run unless both confirmations are set, and always refuses the production project (`dttbrxbkqrgxalhsxhml`), whatever else is set:
 
 ```bash
-CONFIRM_NOT_PRODUCTION=yes PGHOST=<staging host> PGPORT=5432 PGUSER=postgres PGDATABASE=postgres PGPASSWORD=<staging password> \
-  supabase/tests/concurrency-tests.sh
+export PGHOST=<staging host> PGPORT=5432 PGUSER=postgres PGDATABASE=postgres PGPASSWORD=<staging password>
+CONFIRM_NOT_PRODUCTION=yes CONFIRM_DATABASE="$PGHOST/$PGDATABASE" supabase/tests/concurrency-tests.sh
 ```
+
+- **Test run ID.** Each run prints a unique ID (or use your own with `TEST_RUN_ID=…`, 6–40 letters/digits). Every booking it creates carries that ID: reference `CT-<run id>-<nn>`, email `concurrency-test+<run id>@example.invalid`, and admin notes "Concurrency test run <run id>: <test name>".
+- **Listing (read-only):** `supabase/tests/concurrency-tests.sh --list <run id>` shows that run's bookings; `--list-runs` lists every run with its number of bookings.
+- **Nothing is deleted.** Paid test bookings stay in staging; the paid-booking protections are not relaxed for tests.
+- **Results.** Each test prints PASS, or FAIL with the reason (for example "session B did NOT wait for session A", "session B SUCCEEDED but should have been refused", or the database error if a setup statement failed). The script waits for both sessions of every test, removes its temporary files on exit (also on failure or Ctrl-C), and ends with a summary listing any failed tests. Exit code 0 = all passed, 1 = a test failed, 2 = refused to run or setup problem.
+- **Interrupted runs.** If you press Ctrl-C mid-test, the change still open in session A is rolled back by the database (nothing half-done is kept); its connection closes within a few seconds.
 
 Each test holds one change open for 4 seconds in session A, starts session B, checks that B is made to **wait**, and then checks the result:
 
@@ -114,7 +132,7 @@ Each test holds one change open for 4 seconds in session A, starts session B, ch
 | £150 refund of a £200 payment | Another £150 refund | The second waits, then is refused ("exceed the original payment"); total £150 |
 | Payment being recorded | TRUNCATE of room / photo records | TRUNCATE waits, then is refused; records intact |
 
-Expected last line: `== All concurrency tests passed`.
+Expected last line: `== All concurrency tests passed (11) – test run <run id>`.
 
 ## 9. Things that must be refused (staging SQL editor)
 
@@ -136,8 +154,9 @@ The SQL editor runs as `postgres`, the table owner. Each statement must fail wit
 
 Production can be considered only when **all** of these are true:
 
-- Every row in sections 1–9 behaved as expected on staging, including `== All concurrency tests passed`.
-- The TRUNCATE check (1.4) returned no rows.
+- Every row in sections 1–9 behaved as expected on staging, including `== All concurrency tests passed (11)` – keep the test run ID with your notes.
+- The TRUNCATE check (1.4) and the GBP check (1.8) returned no rows.
+- The webhook endpoint's API version is `2024-10-28.acacia` or later.
 - The migration ran twice on staging without errors.
 - Your business address and email are on the cancellation page and form.
 - The cancellation, early-start and terms wording has been checked by a suitably qualified adviser.

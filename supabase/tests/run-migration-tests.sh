@@ -228,9 +228,16 @@ if $P -d mig_t5 -f "$M" >/dev/null 2>/tmp/mig.err; then fail "re-run accepted a 
 if grep -q "refunds.currency" /tmp/mig.err; then pass "re-run stops when a refund column is made optional (currency), nothing changed"; else cat /tmp/mig.err; fail "wrong error"; fi
 for d in mig_t1 mig_t2 mig_t3 mig_t4 mig_t5 mig_l; do $P -d postgres -c "drop database if exists $d" >/dev/null; done
 
+echo "== 15. An existing verified payment not in GBP stops the migration (records are not changed)"
+fresh mig_g; seed_customers mig_g
+$P -d mig_g -c "insert into public.payments (enquiry_id, kind, outcome, amount_pence, currency, stripe_checkout_session_id, stripe_payment_intent_id, stripe_event_id) values ('33333333-3333-4333-a333-333333333333', 'full', 'deposit_recorded', 41000, 'eur', 'cs_g', 'pi_old_eur', 'evt_g')" >/dev/null
+expect_stop mig_g "recorded payments that are not in GBP: pi_old_eur (deposit_recorded, eur)" "an older verified payment logged in EUR"
+if [ "$(q mig_g "select currency from public.payments where stripe_payment_intent_id = 'pi_old_eur'")" = eur ]; then pass "the EUR entry was left exactly as it was"; else fail "record changed"; fi
+$P -d postgres -c "drop database if exists mig_g" >/dev/null
+
 echo "== 14. Two sessions at once (payment vs room/photo changes, consent, refunds, TRUNCATE)"
 fresh mig_c; seed_customers mig_c; $P -d mig_c -f "$M" >/dev/null
-if CONFIRM_NOT_PRODUCTION=yes PGDATABASE=mig_c supabase/tests/concurrency-tests.sh; then pass "all concurrency tests passed"; else fail "concurrency tests failed"; fi
+if CONFIRM_NOT_PRODUCTION=yes CONFIRM_DATABASE="$PGHOST/mig_c" PGDATABASE=mig_c supabase/tests/concurrency-tests.sh; then pass "all concurrency tests passed"; else fail "concurrency tests failed"; fi
 $P -d postgres -c "drop database if exists mig_c" >/dev/null
 
 echo "== All migration checks passed"

@@ -59,6 +59,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
   }
 
+  // Stripe only sends refund.created/updated/failed for CARD refunds from API version 2024-10-28.acacia.
+  // The endpoint's API version is chosen in Stripe when the endpoint is created; an older one would
+  // silently miss refunds made in the Stripe dashboard. Shout about it on every event.
+  if (event.api_version && event.api_version < "2024-10-28") {
+    console.error(`Stripe webhook endpoint uses API version ${event.api_version}: card refunds will NOT be recorded. Recreate the endpoint with 2024-10-28.acacia or later.`);
+  }
+
   // Defence in depth: a live-mode event must never be processed with test keys, or the reverse
   // (each mode also has its own signing secret, so this should never happen).
   const liveKey = /^(sk|rk)_live_/.test(process.env.STRIPE_SECRET_KEY ?? "");
@@ -116,7 +123,7 @@ async function handlePaidSession(
   if (!paymentIntentId)
     throw new Error(`Session ${session.id} has no payment intent`);
   const amountPence = session.amount_total ?? 0;
-  const currency = session.currency ?? "";
+  const currency = (session.currency ?? "").toLowerCase(); // Stripe uses lowercase ("gbp"); normalised for the log
   const enquiryId =
     session.metadata?.enquiry_id ?? session.client_reference_id ?? "";
 
@@ -170,7 +177,13 @@ async function handlePaidSession(
       { onConflict: "stripe_payment_intent_id", ignoreDuplicates: true },
     );
 
-  if (decision.action === "already_recorded") return;
+  if (decision.action === "already_recorded") {
+    // The booking already holds THIS payment. Make sure its payment-log entry exists too (a
+    // previous attempt may have failed after confirming the booking) – the write ignores duplicates.
+    const { error } = await logPayment("payment_recorded");
+    if (error) throw new Error(error.message); // Stripe retries
+    return;
+  }
 
   let reviewReason: string | null = decision.action === "needs_review" ? decision.reason : null;
 
@@ -201,7 +214,10 @@ async function handlePaidSession(
       .select("id");
     if (updateError) throw new Error(updateError.message);
     if (updated && updated.length === 1) {
-      await logPayment("payment_recorded");
+      // The payment-log entry is required (refunds must point at it). If it can't be written,
+      // fail so Stripe retries; the retry finds the booking paid and writes the missing entry.
+      const { error: logError } = await logPayment("payment_recorded");
+      if (logError) throw new Error(logError.message);
       await sendPaidEmails(enquiry, amountPence, paymentIntentId);
       return;
     }
@@ -274,8 +290,9 @@ async function handleRefund(supabase: Db, refund: Stripe.Refund) {
   const source = refund.metadata?.source === "admin" ? "admin" : refund.reason === "duplicate" ? "duplicate_payment" : "stripe_dashboard";
   const ref = (booking?.reference as string | undefined) ?? enquiryId ?? paymentIntentId;
   let added: boolean;
+  let statusChanged: boolean;
   try {
-    added = await recordRefund(supabase, refund, { enquiryId, source });
+    ({ added, statusChanged } = await recordRefund(supabase, refund, { enquiryId, source }));
   } catch (err) {
     if (!(err instanceof RefundMismatchError)) throw err; // e.g. database unreachable → Stripe retries
     // Wrong currency, more than was paid, or another booking: don't record it, tell the owner
@@ -286,7 +303,8 @@ async function handleRefund(supabase: Db, refund: Stripe.Refund) {
     ]);
     return;
   }
-  if (refund.status === "failed" || refund.status === "canceled") {
+  // Alert once: when the failure is first recorded (Stripe may send both refund.updated and refund.failed)
+  if ((refund.status === "failed" || refund.status === "canceled") && (added || statusChanged)) {
     await sendNotification(`⚠ REFUND ${refund.status === "failed" ? "FAILED" : "CANCELLED"} – ${ref}`, [
       `A refund of ${formatPence(refund.amount)} did not go through (Stripe ${refund.id}).`,
       `Please check it in your Stripe dashboard.`,
