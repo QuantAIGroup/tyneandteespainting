@@ -152,30 +152,32 @@ Its production protection works by name. If you connect to production through an
 
 ### Concurrency tests (10)
 
-In each test, session A holds a change open for about 4 seconds without committing. Session B (and, in one test, C) then starts. The script checks that B is made to **wait**, how each session ended, and the final state.
+In each test, session A holds a change open for 4 seconds without committing, then session B starts. The script checks that B is made to **wait** (a real lock wait seen in the database), how each session ended, and the final state.
 
 | Session A (open) | Session B | Expected |
 |---|---|---|
 | Payment being recorded | Delete / change / add a room record (3 tests) | B waits, then is refused; booking paid, room records unchanged |
 | Payment being recorded | Delete / add a photo record (2 tests) | B waits, then is refused; photo records unchanged |
-| Room record being changed | Payment recorded | The payment waits, then succeeds (one clear order) |
+| Room record being deleted | Payment recorded | The payment waits, then succeeds (one clear order) |
 | Payment request being withdrawn | Consent recorded | Consent waits, then is refused ("awaiting payment") |
 | Price being changed | Consent recorded for the old price | Consent waits, then is refused |
 | Payment being recorded | TRUNCATE of room records / of photo records (2 tests) | TRUNCATE waits, then is refused; records intact |
 
 ### Refund-limit tests (7)
 
-Each test uses a fresh paid test booking. Steps run in order, and each must give exactly the result shown. "Reserved" means the amount that counts against the original payment.
+Each test uses a fresh paid test booking. C1–C4 run one step at a time, in order; C5–C7 run sessions at the same moment, like the concurrency tests. Each step must give exactly the result shown. "Reserved" means the total of refunds that are pending, requires_action or succeeded – the amount that counts against the original payment.
 
 | Test | Steps → expected | Final check |
 |---|---|---|
-| C1 Pending refunds reserve the amount (£375.50 paid) | £300 pending → accepted · £100 → **refused** (would exceed) · £75.50 → accepted · 1p → **refused** | Reserved £375.50 exactly |
+| C1 Pending refunds reserve the amount (£375.50 paid) | £300 pending → accepted · £100 → **refused** (£400 would exceed) · £75.50 → accepted · 1p → **refused** | Reserved £375.50 exactly |
 | C2 A failed refund releases its amount (£375.50) | £300 pending → accepted · £375.50 → **refused** · mark the £300 **failed** → accepted · £375.50 → accepted · failed → pending → **refused** (failed is final) | Failed record still kept; reserved £375.50 |
-| C3 A cancelled refund releases its amount (£375.50) | As C2, but the £300 is marked **cancelled** | Cancelled record kept; reserved £375.50 |
+| C3 A cancelled refund releases its amount (£375.50) | As C2, but the £300 is marked **cancelled** (status `canceled`) | Cancelled record kept; reserved £375.50 |
 | C4 Succeeded refunds keep counting (£375.50) | £300 succeeded → accepted · £100 → **refused** · £75.50 → accepted · succeeded → pending → **refused** · succeeded → failed (Stripe reports a late failure) → accepted · £300 → accepted | Reserved £375.50 |
-| C5 Three refunds at once (£300 paid) | A: £150 held open; B and C: £150 each at the same moment | B and C **both wait**; then one is accepted and one **refused**; total £300, never more |
-| C6 A refund being released at the same moment (£300) | A: marks a £300 pending refund failed, not yet committed; B: £200 | B is **refused at once, without waiting**. This is deliberately cautious: the database counts the £300 until the release is committed. After the commit, £200 → accepted; reserved £200 |
-| C7 Two refunds at once (£200 paid) | A: £150 held open; B: £150 | B waits, then is refused ("exceed the original payment"); total £150 |
+| C5 Three refunds at once (£375.50 paid) | A: £150, held open · B and C: £150 each, started together → B and C **both wait** for A; after A commits, one is accepted and the other is **refused** (£450 would exceed £375.50) | Reserved £300 |
+| C6 A refund being released at the same moment (£375.50 paid) | £300 pending → accepted · A: marks the £300 **failed**, held open, not committed · B: £200 → B does **not wait** and is **refused at once** ("exceed the original payment"; £300 + £200 = £500), while A is still open · after A commits: the £300 is failed, and a new £200 → accepted | Reserved £200 |
+| C7 Two refunds at once (£200 paid) | A: £150, held open · B: £150 → B waits for A, then is **refused** ("exceed the original payment"; £300 would exceed £200) | £150 in total |
+
+**Why C6 doesn't wait.** The database locks the original payment only when a refund is **added**. Changing a refund's status takes no lock on the payment, because a status change can only keep an amount reserved or release it, never add to it. So the £200 doesn't wait for the open change. It counts the last saved state, in which the £300 is still reserved, and is refused. That is the safe direction: an unsaved release can delay a refund but can never cause an over-refund. The script checks two things: that there was no lock wait, and that the £200 was decided at least 1 second before session A finished (A saves its change as its last step, after holding it for 4 seconds).
 
 Expected last line: `== All concurrency tests passed (17 of 17) – test run <run id>`. Keep the run ID with your notes.
 

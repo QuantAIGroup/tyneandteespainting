@@ -119,6 +119,11 @@ wait_for() { # sql returning t/f, tries
   return 1
 }
 
+now_ms() { # milliseconds on the local clock – works with bash 5 and with macOS's bash 3.2 (via perl)
+  if [ -n "${EPOCHREALTIME:-}" ]; then local t=${EPOCHREALTIME/[.,]/}; echo "${t:0:${#t}-3}"
+  else perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; fi
+}
+
 server_txn() { # statements → one transaction run as the website server
   printf "begin;\nset local role service_role;\nselect set_config('request.jwt.claims', '{\"role\":\"service_role\"}', true);\n%s\ncommit;\n" "$1"
 }
@@ -177,22 +182,26 @@ refund_status_stmt() { echo "update public.refunds set status = '$3', updated_at
 reserved() { q "select coalesce(sum(amount_pence), 0) from public.refunds where stripe_payment_intent_id = 'pi-$1' and status in ('pending', 'requires_action', 'succeeded')"; }
 
 # run_sessions A_SQL FOLLOWER_SQL... – A starts and holds (its SQL must run pg_sleep before commit);
-# then every follower starts. Sets A_STARTED, A_RC, and for follower i: F_RC[i], F_WAITED[i] (yes|no);
-# outputs in $OUT/a and $OUT/f<i>. Waits for every session it started.
+# then every follower starts. Sets A_STARTED, A_RC, and for follower i: F_RC[i], F_WAITED[i] (yes|no)
+# and F_AHEAD_MS[i] – how many milliseconds before session A finished (A commits as its last step)
+# follower i had already finished (negative if after). Outputs in $OUT/a and $OUT/f<i>.
+# Waits for every session it started.
 run_sessions() {
   local a_sql=$1; shift
   local app="ct_${RUN_ID}" pa i n=$# f
   local -a fpids=()
-  A_STARTED=no; A_RC=; F_RC=(); F_WAITED=()
+  A_STARTED=no; A_RC=; F_RC=(); F_WAITED=(); F_AHEAD_MS=()
+  rm -f "$OUT"/*.end
   : >"$OUT/a"
-  PGAPPNAME="${app}_a" "${P[@]}" <<<"$a_sql" >"$OUT/a" 2>&1 &
+  # each session records (local clock, milliseconds) when it finished
+  ( PGAPPNAME="${app}_a" "${P[@]}" <<<"$a_sql" >"$OUT/a" 2>&1; rc=$?; now_ms >"$OUT/a.end"; exit $rc ) &
   pa=$!; PIDS+=("$pa")
   if wait_for "select exists (select 1 from pg_stat_activity where application_name = '${app}_a' and query like '%pg_sleep%' and state = 'active')"; then
     A_STARTED=yes
     i=0
     for f in "$@"; do
       : >"$OUT/f$i"
-      PGAPPNAME="${app}_f$i" "${P[@]}" <<<"$f" >"$OUT/f$i" 2>&1 &
+      ( PGAPPNAME="${app}_f$i" "${P[@]}" <<<"$f" >"$OUT/f$i" 2>&1; rc=$?; now_ms >"$OUT/f$i.end"; exit $rc ) &
       fpids[$i]=$!; PIDS+=("${fpids[$i]}")
       i=$((i + 1))
     done
@@ -203,10 +212,15 @@ run_sessions() {
     for ((i = 0; i < n; i++)); do wait "${fpids[$i]}"; F_RC[$i]=$?; done
   fi
   wait "$pa"; A_RC=$?
+  if [ "$A_STARTED" = yes ]; then
+    for ((i = 0; i < n; i++)); do
+      F_AHEAD_MS[$i]=$(( $(cat "$OUT/a.end" 2>/dev/null || echo 0) - $(cat "$OUT/f$i.end" 2>/dev/null || echo 0) ))
+    done
+  fi
   PIDS=()
 }
 # Single-follower form: sets BLOCKED, B_RC and $OUT/b
-run_pair() { run_sessions "$1" "$2"; BLOCKED=${F_WAITED[0]:-no}; B_RC=${F_RC[0]:-}; cp "$OUT/f0" "$OUT/b" 2>/dev/null || : >"$OUT/b"; }
+run_pair() { run_sessions "$1" "$2"; BLOCKED=${F_WAITED[0]:-no}; B_RC=${F_RC[0]:-}; B_AHEAD_MS=${F_AHEAD_MS[0]:-0}; cp "$OUT/f0" "$OUT/b" 2>/dev/null || : >"$OUT/b"; }
 
 a_reasons() { # reasons about session A, appended to array WHY
   [ "$A_STARTED" = yes ] || { WHY+=("session A never started its change: $(last_lines "$OUT/a")"); return; }
@@ -354,20 +368,31 @@ if make_paid_booking "$name" 37550; then
   report "$name: refunds 2 and 3 both wait; one is accepted, one refused; total £300 (never above £375.50)" "${WHY[@]}"
 else fail "$name" "$ERROR"; fi
 
-# C6. A release that isn't saved yet still counts (safe: refused, never over-refunded)
-name="a refund being marked failed still counts until saved"
+# C6. A release that isn't committed yet still counts.
+# Changing a refund's status takes no lock on the original payment (protect_refund_log only locks the
+# payment row FOR UPDATE when a refund is ADDED), and a status change can only keep or release an
+# amount, never add to it. So a new refund made at that moment does NOT wait: it reads the last
+# committed state, in which the £300 is still reserved, and is refused at once – while session A is
+# still open. That is the safe side: it can never over-refund. Once the release is committed, the
+# same £200 is accepted.
+name="a refund being marked failed still counts until committed (£375.50 payment)"
 if make_paid_booking "$name" 37550; then
   id=$BOOKING; WHY=()
   step "£300.00 pending" "$(refund_stmt "$id" r1 30000 pending)" ok || WHY+=("$STEP_WHY")
   run_pair "$(server_txn "$(refund_status_stmt "$id" r1 failed) select pg_sleep($HOLD);")" "$(server_txn "$(refund_stmt "$id" r2 20000)")"
   a_reasons
   if [ "$A_STARTED" = yes ]; then
+    [ "$BLOCKED" = no ] || WHY+=("the £200 refund WAITED for the status change – expected an immediate decision")
+    # A holds its change for $HOLD seconds and commits as its last step; finishing at least a second
+    # before A did means the £200 was decided while the status change was still uncommitted.
+    [ "$B_AHEAD_MS" -ge 1000 ] || WHY+=("the £200 refund finished only ${B_AHEAD_MS} ms before session A ended – expected it to be decided while A was still open")
     if [ "$B_RC" = 0 ]; then WHY+=("£200 was accepted while the £300 was still reserved – could over-refund")
     elif ! grep -q "exceed the original payment" "$OUT/b"; then WHY+=("£200 failed for a different reason: $(last_lines "$OUT/b")"); fi
   fi
-  step "£200.00 once the failure is saved" "$(refund_stmt "$id" r3 20000)" ok || WHY+=("$STEP_WHY")
+  c=$(q "select status from public.refunds where stripe_refund_id = 're-r1-$id'"); [ "$c" = failed ] || WHY+=("the £300 refund should be failed after session A committed (got: $c)")
+  step "£200.00 once the failure is committed" "$(refund_stmt "$id" r3 20000)" ok || WHY+=("$STEP_WHY")
   r=$(reserved "$id"); [ "$r" = 20000 ] || WHY+=("expected £200.00 reserved at the end, got ${r}p")
-  report "$name: while £300 is being marked failed, £200 is refused (conservative); after it's saved, £200 is accepted" "${WHY[@]}"
+  report "$name: while £300 is being marked failed, £200 is refused at once without waiting (A still open); after the commit, £200 is accepted; £200 reserved" "${WHY[@]}"
 else fail "$name" "$ERROR"; fi
 
 # C7. Two refunds of a smaller payment at once
