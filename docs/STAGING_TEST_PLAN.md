@@ -165,7 +165,7 @@ In each test, session A holds a change open for 4 seconds without committing, th
 
 ### Refund-limit tests (7)
 
-Each test uses a fresh paid test booking. C1–C4 run one step at a time, in order; C5–C7 run sessions at the same moment, like the concurrency tests. Each step must give exactly the result shown. "Reserved" means the total of refunds that are pending, requires_action or succeeded – the amount that counts against the original payment.
+Each test uses a fresh paid test booking. C1–C4 run one step at a time, in order. C5 and C7 run sessions at the same moment, like the concurrency tests (session A held open for 4 seconds). C6 holds session A open with a gate instead (explained below the table). Each step must give exactly the result shown. "Reserved" means the total of refunds that are pending, requires_action or succeeded – the amount that counts against the original payment.
 
 | Test | Steps → expected | Final check |
 |---|---|---|
@@ -174,10 +174,19 @@ Each test uses a fresh paid test booking. C1–C4 run one step at a time, in ord
 | C3 A cancelled refund releases its amount (£375.50) | As C2, but the £300 is marked **cancelled** (status `canceled`) | Cancelled record kept; reserved £375.50 |
 | C4 Succeeded refunds keep counting (£375.50) | £300 succeeded → accepted · £100 → **refused** · £75.50 → accepted · succeeded → pending → **refused** · succeeded → failed (Stripe reports a late failure) → accepted · £300 → accepted | Reserved £375.50 |
 | C5 Three refunds at once (£375.50 paid) | A: £150, held open · B and C: £150 each, started together → B and C **both wait** for A; after A commits, one is accepted and the other is **refused** (£450 would exceed £375.50) | Reserved £300 |
-| C6 A refund being released at the same moment (£375.50 paid) | £300 pending → accepted · A: marks the £300 **failed**, held open, not committed · B: £200 → B does **not wait** and is **refused at once** ("exceed the original payment"; £300 + £200 = £500), while A is still open · after A commits: the £300 is failed, and a new £200 → accepted | Reserved £200 |
+| C6 A refund being released at the same moment (£375.50 paid) | £300 pending → accepted · A: marks the £300 **failed**, then waits at a gate the script controls, so its transaction stays open until the script releases it · while A is open: the £300 still reads `pending` from outside, and the original payment row is **not locked** · B: £200 → B is **never seen waiting for a lock** and is **refused** ("exceed the original payment"; £300 + £200 = £500) · after B has finished, A is checked to be **still open** · gate released → A commits: the £300 is failed; the refused £200 left no record; a new £200 → accepted | Reserved £200 |
 | C7 Two refunds at once (£200 paid) | A: £150, held open · B: £150 → B waits for A, then is **refused** ("exceed the original payment"; £300 would exceed £200) | £150 in total |
 
-**Why C6 doesn't wait.** The database locks the original payment only when a refund is **added**. Changing a refund's status takes no lock on the payment, because a status change can only keep an amount reserved or release it, never add to it. So the £200 doesn't wait for the open change. It counts the last saved state, in which the £300 is still reserved, and is refused. That is the safe direction: an unsaved release can delay a refund but can never cause an over-refund. The script checks two things: that there was no lock wait, and that the £200 was decided at least 1 second before session A finished (A saves its change as its last step, after holding it for 4 seconds).
+**Why C6 doesn't wait.** The database locks the original payment only when a refund is **added**. Changing a refund's status doesn't touch the payment at all, because a status change can only keep an amount reserved or release it, never add to it. So the £200 has nothing to wait for. It counts the last saved state, in which the £300 is still reserved, and is refused. That is the safe direction: an unsaved release can delay a refund but can never cause an over-refund.
+
+**How C6 proves it, without timing.** A small extra "gate" session holds a database advisory lock, a marker that is not on any of your tables. After marking the £300 failed, session A waits for that lock, so A's transaction stays open for as long as the test needs. While A is provably open, the script checks four things:
+
+- the £300 still reads `pending` from outside;
+- the payment row can be locked at once (a probe that is rolled back immediately);
+- B finishes, refused, without ever being seen waiting for a lock;
+- once B has finished, A is still inside its transaction, waiting only at the gate.
+
+Only then does the script release the gate so A commits. No fixed delay decides the result. A long safety limit (about a minute) exists only to stop a hung test, and it reports a failure if reached. Interrupting the script releases the gate and rolls back A.
 
 Expected last line: `== All concurrency tests passed (17 of 17) – test run <run id>`. Keep the run ID with your notes.
 
