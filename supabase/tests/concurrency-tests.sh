@@ -368,14 +368,28 @@ else fail "$name" "$ERROR"; fi
 #   · nothing holds a lock on the original payment row (a FOR UPDATE NOWAIT probe, rolled back, succeeds);
 #   · session B (£200) finishes – refused – without ever being seen in a lock wait;
 #   · A is still in its open transaction, blocked only on the gate, after B has finished.
-# Only then is the gate released so A commits. A safety limit (C6_LIMIT_TRIES × 0.1 s) only stops a hang.
+# Only then is the gate released so A commits.
+#
+# Knowing when B has finished – from the database, not from the shell's process table:
+#   1. B connects and first waits at its own start gate (a second advisory lock, held by session S),
+#      before doing anything else. The script waits until it SEES B's session in pg_stat_activity,
+#      under its unique application name, waiting at that gate – so B has provably connected and has
+#      provably not started its refund. (A fast B can never finish unseen between two polls.)
+#   2. The script releases the start gate. From then on it polls pg_stat_activity for B's session:
+#        – a lock wait other than the start gate        → B waited (failure);
+#        – the session has disappeared                  → B's connection has closed, so its
+#          transaction has ended (a backend leaves pg_stat_activity only when it exits).
+#      Only then does it collect B's exit code with `wait`.
+# If B fails before reaching its start gate (e.g. it cannot connect), its error output ends the wait.
+# A safety limit (C6_LIMIT_TRIES × 0.1 s per phase) only stops a hang and is reported as a failure.
 C6_LIMIT_TRIES=600
 name="a refund being marked failed still counts until committed (£375.50 payment)"
 if make_paid_booking "$name" 37550; then
   id=$BOOKING; WHY=()
   app="ct_${RUN_ID}_c6"
-  key="hashtext('concurrency-test-$RUN_ID-c6')::bigint"
-  pg=; pa=; pb=; A_READY=no; B_DONE=no; B_WAITED=no; A_OPEN=no; G_HELD=no
+  key="hashtext('concurrency-test-$RUN_ID-c6')::bigint"         # gate holding A open
+  key2="hashtext('concurrency-test-$RUN_ID-c6-start')::bigint"  # B's start gate
+  pg=; ps=; pa=; pb=; A_READY=no; B_SEEN=no; B_DONE=no; B_WAITED=no; A_OPEN=no; G_HELD=no; S_HELD=no
   step "£300.00 pending" "$(refund_stmt "$id" r1 30000 pending)" ok || WHY+=("$STEP_WHY")
   # Gate G: takes the advisory lock and keeps its session open until the script cancels it.
   PGAPPNAME="${app}_g" "${P[@]}" <<<"select pg_advisory_lock($key); select pg_sleep(3600);" >"$OUT/g" 2>&1 &
@@ -391,9 +405,9 @@ reset role;
 select pg_advisory_xact_lock($key);
 commit;" >"$OUT/a" 2>&1 &
     pa=$!; PIDS+=("$pa")
-    for ((t = 0; t < C6_LIMIT_TRIES; t++)); do   # until A is waiting at the gate, or has ended (failed)
+    for ((t = 0; t < C6_LIMIT_TRIES; t++)); do   # until A is seen waiting at the gate, or has reported an error
       [ "$(q "select exists (select 1 from pg_stat_activity where application_name = '${app}_a' and wait_event_type = 'Lock' and wait_event = 'advisory')")" = t ] && { A_READY=yes; break; }
-      kill -0 "$pa" 2>/dev/null || break
+      grep -qi "error" "$OUT/a" 2>/dev/null && break
       sleep 0.1
     done
   else WHY+=("the gate session could not take its advisory lock: $(last_lines "$OUT/g")"); fi
@@ -403,14 +417,37 @@ commit;" >"$OUT/a" 2>&1 &
     if ! run_sql "begin; select 1 from public.payments where stripe_payment_intent_id = 'pi-$id' for update nowait; rollback;"; then
       WHY+=("the original payment row is locked while a refund's status is being changed: $(last_lines "$OUT/s")")
     fi
-    # Session B: the £200 refund. Watch until it has finished or is seen waiting for a lock.
-    PGAPPNAME="${app}_b" "${P[@]}" <<<"$(server_txn "$(refund_stmt "$id" r2 20000)")" >"$OUT/b" 2>&1 &
+    # Start gate S for session B (see "Knowing when B has finished" above).
+    PGAPPNAME="${app}_s" "${P[@]}" <<<"select pg_advisory_lock($key2); select pg_sleep(3600);" >"$OUT/gs" 2>&1 &
+    ps=$!; PIDS+=("$ps")
+    wait_for "select exists (select 1 from pg_locks l join pg_stat_activity s using (pid) where s.application_name = '${app}_s' and l.locktype = 'advisory' and l.granted)" && S_HELD=yes
+    [ "$S_HELD" = yes ] || WHY+=("B's start gate could not take its advisory lock: $(last_lines "$OUT/gs")")
+  elif [ "$G_HELD" = yes ]; then WHY+=("session A never reached the gate after its status change: $(last_lines "$OUT/a")"); fi
+  if [ "$S_HELD" = yes ]; then
+    # Session B: wait at the start gate, release it, then the £200 refund as the website server.
+    PGAPPNAME="${app}_b" "${P[@]}" <<<"select pg_advisory_lock($key2);
+select pg_advisory_unlock($key2);
+$(server_txn "$(refund_stmt "$id" r2 20000)")" >"$OUT/b" 2>&1 &
     pb=$!; PIDS+=("$pb")
+    # Phase 1: B has connected and is waiting at its start gate (its refund has not started).
     for ((t = 0; t < C6_LIMIT_TRIES; t++)); do
-      kill -0 "$pb" 2>/dev/null || { B_DONE=yes; break; }
-      [ "$(q "select exists (select 1 from pg_stat_activity where application_name = '${app}_b' and wait_event_type = 'Lock')")" = t ] && { B_WAITED=yes; break; }
+      [ "$(q "select exists (select 1 from pg_stat_activity where application_name = '${app}_b' and wait_event_type = 'Lock' and wait_event = 'advisory')")" = t ] && { B_SEEN=yes; break; }
+      grep -qi "error" "$OUT/b" 2>/dev/null && break
       sleep 0.1
     done
+    if [ "$B_SEEN" = yes ]; then
+      # Release B's start gate, then Phase 2: watch B's session until it is gone or seen waiting for a lock.
+      q "select pg_cancel_backend(pid) from pg_stat_activity where application_name = '${app}_s'" >/dev/null
+      wait "$ps" 2>/dev/null; ps=
+      for ((t = 0; t < C6_LIMIT_TRIES; t++)); do
+        st=$(q "select coalesce((select case when wait_event_type = 'Lock' and wait_event <> 'advisory' then 'lock' else 'present' end
+                                   from pg_stat_activity where application_name = '${app}_b' limit 1), 'gone')")
+        [ "$st" = gone ] && { B_DONE=yes; break; }
+        [ "$st" = lock ] && { B_WAITED=yes; break; }
+        [ "$st" = present ] || { WHY+=("could not read pg_stat_activity while watching B: $st"); break; }
+        sleep 0.1
+      done
+    else WHY+=("session B was never seen connected and waiting at its start gate: $(last_lines "$OUT/b")"); fi
     if [ "$B_DONE" = yes ]; then
       wait "$pb"; B_RC=$?; pb=
       # Is A still inside its transaction, blocked only at the gate?
@@ -419,9 +456,10 @@ commit;" >"$OUT/a" 2>&1 &
       if [ "$B_RC" = 0 ]; then WHY+=("£200 was accepted while the £300 was still reserved – could over-refund")
       elif ! grep -q "exceed the original payment" "$OUT/b"; then WHY+=("£200 failed for a different reason: $(last_lines "$OUT/b")"); fi
     elif [ "$B_WAITED" = yes ]; then WHY+=("the £200 refund WAITED for a lock while the status change was open – expected an immediate decision")
-    else WHY+=("the £200 refund neither finished nor waited for a lock within the safety limit"); fi
-  elif [ "$G_HELD" = yes ]; then WHY+=("session A never reached the gate after its status change: $(last_lines "$OUT/a")"); fi
-  # Release the gate (cancel G's sleep; its session ends and frees the lock), then let every session finish.
+    elif [ "$B_SEEN" = yes ]; then WHY+=("the £200 refund's session neither ended nor waited for a lock within the safety limit"); fi
+  fi
+  # Release the gates (cancelling a gate's sleep ends its session, which frees its lock), then let every session finish.
+  [ -n "$ps" ] && { q "select pg_cancel_backend(pid) from pg_stat_activity where application_name = '${app}_s'" >/dev/null; wait "$ps" 2>/dev/null; }
   [ "$G_HELD" = yes ] && q "select pg_cancel_backend(pid) from pg_stat_activity where application_name = '${app}_g'" >/dev/null
   [ -n "$pg" ] && wait "$pg" 2>/dev/null
   if [ -n "$pa" ]; then wait "$pa"; rc=$?; [ "$rc" = 0 ] || WHY+=("session A failed to commit (exit $rc): $(last_lines "$OUT/a")"); fi

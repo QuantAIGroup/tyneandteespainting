@@ -174,7 +174,7 @@ Each test uses a fresh paid test booking. C1–C4 run one step at a time, in ord
 | C3 A cancelled refund releases its amount (£375.50) | As C2, but the £300 is marked **cancelled** (status `canceled`) | Cancelled record kept; reserved £375.50 |
 | C4 Succeeded refunds keep counting (£375.50) | £300 succeeded → accepted · £100 → **refused** · £75.50 → accepted · succeeded → pending → **refused** · succeeded → failed (Stripe reports a late failure) → accepted · £300 → accepted | Reserved £375.50 |
 | C5 Three refunds at once (£375.50 paid) | A: £150, held open · B and C: £150 each, started together → B and C **both wait** for A; after A commits, one is accepted and the other is **refused** (£450 would exceed £375.50) | Reserved £300 |
-| C6 A refund being released at the same moment (£375.50 paid) | £300 pending → accepted · A: marks the £300 **failed**, then waits at a gate the script controls, so its transaction stays open until the script releases it · while A is open: the £300 still reads `pending` from outside, and the original payment row is **not locked** · B: £200 → B is **never seen waiting for a lock** and is **refused** ("exceed the original payment"; £300 + £200 = £500) · after B has finished, A is checked to be **still open** · gate released → A commits: the £300 is failed; the refused £200 left no record; a new £200 → accepted | Reserved £200 |
+| C6 A refund being released at the same moment (£375.50 paid) | £300 pending → accepted · A: marks the £300 **failed**, then waits at a gate the script controls, so its transaction stays open until the script releases it · while A is open: the £300 still reads `pending` from outside, and the original payment row is **not locked** · B: £200 → B is first **seen connected**, waiting at its own start gate; once released, it is **never seen waiting for a lock**, its database session **ends**, and it was **refused** ("exceed the original payment"; £300 + £200 = £500) · after B has finished, A is checked to be **still open** · gate released → A commits: the £300 is failed; the refused £200 left no record; a new £200 → accepted | Reserved £200 |
 | C7 Two refunds at once (£200 paid) | A: £150, held open · B: £150 → B waits for A, then is **refused** ("exceed the original payment"; £300 would exceed £200) | £150 in total |
 
 **Why C6 doesn't wait.** The database locks the original payment only when a refund is **added**. Changing a refund's status doesn't touch the payment at all, because a status change can only keep an amount reserved or release it, never add to it. So the £200 has nothing to wait for. It counts the last saved state, in which the £300 is still reserved, and is refused. That is the safe direction: an unsaved release can delay a refund but can never cause an over-refund.
@@ -183,10 +183,15 @@ Each test uses a fresh paid test booking. C1–C4 run one step at a time, in ord
 
 - the £300 still reads `pending` from outside;
 - the payment row can be locked at once (a probe that is rolled back immediately);
-- B finishes, refused, without ever being seen waiting for a lock;
+- B finishes, refused, without ever being seen waiting for a lock (how "finishes" is detected is explained below);
 - once B has finished, A is still inside its transaction, waiting only at the gate.
 
-Only then does the script release the gate so A commits. No fixed delay decides the result. A long safety limit (about a minute) exists only to stop a hung test, and it reports a failure if reached. Interrupting the script releases the gate and rolls back A.
+**How the script knows B has finished.** It watches the database, not the processes on your computer:
+
+1. B connects and first waits at its own start gate, a second advisory lock held by another small session. The script waits until it **sees** B's session in the database's activity list (`pg_stat_activity`), under B's unique name, waiting at that gate. This proves B has connected but hasn't started its refund, so a quick B can't start and finish between two checks without being seen.
+2. The script releases the start gate, then keeps checking B's session. If B is seen waiting for any other lock, the test fails. When B's session has **gone** from the list, its connection has closed and its transaction has ended. Only then does the script read B's result. If B fails before reaching its start gate (for example, it can't connect), its error message ends the wait and the test fails.
+
+Only then does the script release the gate so A commits. No fixed delay decides the result. A long safety limit (about a minute for each wait) exists only to stop a hung test, and it reports a failure if reached. Interrupting the script releases the gate and rolls back A.
 
 Expected last line: `== All concurrency tests passed (17 of 17) – test run <run id>`. Keep the run ID with your notes.
 
